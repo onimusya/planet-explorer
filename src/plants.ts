@@ -501,10 +501,60 @@ export function genShrub(seed: number, variant: number, lod: number): MeshBuilde
   return mb;
 }
 
+// Chiselled rock: an icosphere projected onto a random convex polytope (soft-min of cutting planes),
+// with fine fBm relief. Vertex grad = convexity (worn edges bright, crevices dark).
+export function rockMesh(mb: MeshBuilder, center: V3, sc: V3, subdiv: number, seed: number, planes: number, bottom: number) {
+  const r = rng(seed * 7919 + 17);
+  const pl: [V3, number][] = [];
+  for (let i = 0; i < planes; i++) {
+    const z = r() * 2 - 1, a = r() * Math.PI * 2, s = Math.sqrt(1 - z * z);
+    pl.push([[s * Math.cos(a), z * 0.85, s * Math.sin(a)], 0.7 + r() * 0.28]);
+  }
+  pl.push([[0, -1, 0], bottom]);
+  const { v, f } = icosphere(subdiv);
+  const k = 0.035;
+  const pos: V3[] = v.map((d) => {
+    // soft-min over plane distances along the ray d (bevelled edges); sphere bound for open directions
+    let acc = Math.exp(-1.18 / k);
+    for (const [n, h] of pl) {
+      const c = dot(d, norm(n));
+      if (c > 1e-3) acc += Math.exp(-(h / c) / k);
+    }
+    let rad = -k * Math.log(acc);
+    rad *= 1 + 0.05 * fbm3(d[0] * 3.1 + seed, d[1] * 3.1, d[2] * 3.1, seed + 5, 4);
+    return add(center, [d[0] * rad * sc[0], d[1] * rad * sc[1], d[2] * rad * sc[2]]);
+  });
+  const nr: V3[] = v.map(() => [0, 0, 0]);
+  const nsum: V3[] = v.map(() => [0, 0, 0]);
+  const ncnt = new Float32Array(v.length);
+  for (let i = 0; i < f.length; i += 3) {
+    const a = pos[f[i]], b = pos[f[i + 1]], c = pos[f[i + 2]];
+    const fn = cross(sub(b, a), sub(c, a));
+    for (let q = 0; q < 3; q++) {
+      const vi = f[i + q], o1 = pos[f[i + (q + 1) % 3]], o2 = pos[f[i + (q + 2) % 3]];
+      const m = nr[vi]; m[0] += fn[0]; m[1] += fn[1]; m[2] += fn[2];
+      const s = nsum[vi]; s[0] += o1[0] + o2[0]; s[1] += o1[1] + o2[1]; s[2] += o1[2] + o2[2];
+      ncnt[vi] += 2;
+    }
+  }
+  const base = mb.count;
+  const scl = Math.cbrt(sc[0] * sc[1] * sc[2]);
+  for (let i = 0; i < v.length; i++) {
+    const d = v[i];
+    const nn = norm(nr[i]);
+    const avg = mul(nsum[i], 1 / ncnt[i]);
+    const convex = dot(nn, sub(pos[i], avg)) / scl; // >0 on ridges, <0 in creases
+    const cv = Math.min(1, Math.max(0, 0.5 + convex * 18));
+    const u = Math.atan2(d[2], d[0]) / (2 * Math.PI) + 0.5;
+    const occl = 0.5 + 0.5 * Math.min(1, Math.max(0, (pos[i][1] - center[1]) / sc[1] + 0.6));
+    mb.v(pos[i], nn, u, d[1] * 0.5 + 0.5, PART.ROCK, 0, occl, cv);
+  }
+  for (let i = 0; i < f.length; i += 3) mb.tri(base + f[i], base + f[i + 1], base + f[i + 2]);
+}
 export function genBoulder(seed: number, variant: number, lod: number): MeshBuilder {
   const mb = new MeshBuilder();
-  const sd = lod === 0 ? 3 : lod === 1 ? 2 : 1;
-  const sc: V3 = variant === 0 ? [1.6, 1.0, 1.3] : variant === 1 ? [1.0, 1.6, 0.9] : [2.4, 0.9, 1.7];
-  blob(mb, [0, 0.2, 0], sc, sd, seed * 13 + variant * 7, PART.ROCK, 0.42, true, 0, 1);
+  const sd = lod === 0 ? 4 : lod === 1 ? 3 : 1;
+  const sc: V3 = variant === 0 ? [1.55, 1.05, 1.3] : variant === 1 ? [1.0, 1.75, 0.9] : [2.3, 0.8, 1.7];
+  rockMesh(mb, [0, 0.25, 0], sc, sd, seed * 13 + variant * 7, 9 + variant * 2, 0.42);
   return mb;
 }

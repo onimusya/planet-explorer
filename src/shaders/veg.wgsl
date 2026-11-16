@@ -189,11 +189,13 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.emit = c * 3.2 * pulse * glow;
     m.rough = 0.3;
     m.trans = 1.0;
-  } else { // rock (luminance floor so small boulders never read as holes)
-    var r = strata(wp.y, wp.xz) * 0.85;
-    r *= 0.75 + 0.35 * fbm3(lp * 1.7, 3) + 0.15;
-    m.alb = r * max(1.0, 0.33 / max(luma(r), 0.02));
-    m.rough = 0.8;
+  } else { // rock: local strata geology, worn bright edges, dark crevices (grad = convexity)
+    let n1 = fbm3(wp * 0.7 + seed * 13.0, 3);
+    var r = strata(wp.y, wp.xz) * (0.78 + 0.45 * n1);
+    r *= mix(0.55, 1.18, smoothstep(0.15, 0.85, grad));
+    m.alb = r;
+    m.rough = 0.78;
+    m.spec = 0.035;
   }
   return m;
 }
@@ -216,7 +218,28 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   var n = normalize(in.nrm);
   if (!front) { n = -n; }
   let valley = valleyMask(in.world.xz);
-  let m = material(part, sp, seed, in.uv, in.ag.y, in.world, in.lpos, valley, ribAA);
+  var m = material(part, sp, seed, in.uv, in.ag.y, in.world, in.lpos, valley, ribAA);
+  if (part == 7.0) {
+    // chipped relief from 3D noise gradient (world space, fades with distance)
+    let bf = 1.0 - smoothstep(25.0, 70.0, dist);
+    if (bf > 0.0) {
+      let q = in.world * 1.6;
+      let e = 0.07;
+      let h0 = noise3(q, BIGP3) + 0.5 * noise3(q * 2.7, BIGP3);
+      let hx = noise3(q + vec3f(e, 0.0, 0.0), BIGP3) + 0.5 * noise3((q + vec3f(e, 0.0, 0.0)) * 2.7, BIGP3);
+      let hy = noise3(q + vec3f(0.0, e, 0.0), BIGP3) + 0.5 * noise3((q + vec3f(0.0, e, 0.0)) * 2.7, BIGP3);
+      let hz = noise3(q + vec3f(0.0, 0.0, e), BIGP3) + 0.5 * noise3((q + vec3f(0.0, 0.0, e)) * 2.7, BIGP3);
+      let gr = vec3f(hx - h0, hy - h0, hz - h0) / e;
+      n = normalize(n - (gr - n * dot(gr, n)) * 0.22 * bf);
+    }
+    // dust and ground cover settle on up-facing surfaces, tying rocks into the local terrain
+    let a = attrAt(in.world.xz);
+    let dustN = fbm3(in.world * 0.9, 2);
+    let up = smoothstep(0.6, 0.95, n.y + dustN * 0.35);
+    let soil = mix(vec3f(0.36, 0.22, 0.16), meadowColor(in.world.xz, 0.5 + dustN, valley, highlandMask(in.world.xz)) * 0.55, smoothstep(0.2, 0.5, a.y));
+    m.alb = mix(m.alb, soil, up * 0.75);
+    m.rough = mix(m.rough, 0.92, up);
+  }
   let sunC = sunLightAt(in.world.y);
   var sh = terrainShadow(in.world.xz, in.world.y + 0.5) * cloudShadow(in.world);
   if (sh > 0.001) { sh *= csmShadow(in.rel, n, dist, ign(in.pos.xy, F.misc.x)); }

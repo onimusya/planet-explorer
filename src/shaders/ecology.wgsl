@@ -56,7 +56,8 @@ fn ecology(s: u32, p: vec2f, h: f32) -> Eco {
     }
     default: {
       // boulders: rocky ground, cliff bases, scattered on meadows
-      o.dens = 0.04 + a.w * 0.35 + smoothstep(0.2, 0.5, slope) * 0.25 + high * 0.15;
+      // (talus collects where cliffs flatten out; never stuck to the walls themselves)
+      o.dens = (0.04 + a.w * 0.35 + smoothstep(0.2, 0.5, slope) * 0.25 + high * 0.15) * (1.0 - smoothstep(0.7, 1.0, slope));
       o.scale = 0.7 + a.w * 0.8;
     }
   }

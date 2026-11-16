@@ -3,6 +3,7 @@
 //#include "noise.wgsl"
 //#include "world.wgsl"
 //#include "lighting.wgsl"
+//#include "materials.wgsl"
 
 const TILE: f32 = 2.0;
 const GRID: u32 = 96u;           // tiles across (192 m)
@@ -21,11 +22,7 @@ const CAP: u32 = 4096u;
 fn grassDensity(p: vec2f) -> f32 {
   let h = heightAt(p);
   if (h < WATER_Y + 0.35) { return 0.0; }
-  let a = attrAt(p);
-  let slope = length(gradAt(p));
-  let n = fbm(p / 32.0, vec2i(512), 2, 0.5);
-  let lush = a.y + n * 0.35 + 0.22 + valleyMask(p) * 0.3 + highlandMask(p) * 0.15;
-  return smoothstep(0.25, 0.5, lush) * (1.0 - smoothstep(0.42, 0.62, slope + a.w * 0.3)) * (1.0 - smoothstep(1100.0, 1250.0, h));
+  return meadowCover(p, attrAt(p), length(gradAt(p)), h);
 }
 
 @compute @workgroup_size(8, 8)
@@ -136,13 +133,7 @@ fn vs(@builtin(vertex_index) vid: u32, @location(0) tile: vec4f) -> VOut {
   o.nrm = normalize(mix(bn, normalAt(p), sat(dcam / 70.0) * 0.6 + 0.25));
   o.t = t;
   // colour by region with per-blade variation
-  let v = h1.x;
-  let pink = mix(vec3f(0.52, 0.09, 0.20), vec3f(0.85, 0.30, 0.32), v);
-  let gold = mix(vec3f(0.55, 0.34, 0.08), vec3f(0.82, 0.62, 0.22), v);
-  let moss = mix(vec3f(0.08, 0.20, 0.30), vec3f(0.24, 0.10, 0.36), v);
-  var c = mix(pink, gold, high);
-  c = mix(c, moss, valley);
-  o.col = c;
+  o.col = meadowColorP(meadowPatch(p), h1.x, valley, high) * (1.0 + 0.35 * meadowWave(p));
   o.misc = vec2f(valley * step(0.82, h1.y), 0.0);
   return o;
 }

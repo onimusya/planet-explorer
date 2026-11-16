@@ -93,18 +93,22 @@ fn terrainSurface(wp: vec3f, dist: f32, fw: f32) -> Surface {
   let snowLine = 1180.0 + nb * 320.0;
   let snowW = smoothstep(snowLine, snowLine + 140.0, y) * (1.0 - smoothstep(0.32, 0.6, slope));
   let shoreW = (1.0 - smoothstep(0.8, 4.0 + nv * 3.0, y)) * (1.0 - rockW);
-  let lushT = attr.y + (nv - 0.5) * 0.35 + valley * 0.4 + 0.15;
-  let grassW = (1.0 - rockW) * (1.0 - shoreW) * smoothstep(0.18, 0.42, lushT);
+  let grassW = (1.0 - rockW) * (1.0 - shoreW) * meadowCover(p, attr, length(g), y);
 
-  // rock: strata with weathering
+  // rock: strata with weathering. On steep faces the variation noise runs in wall-plane coordinates
+  // (and the xz-only crease term is damped) so nothing streaks vertically down the cliffs.
   var rock = strata(y, p);
   let crease = attr.x;
-  rock *= mix(0.62, 1.12, crease) * mix(0.85, 1.12, nv);
+  let steep = smoothstep(0.3, 0.65, slope);
+  let hz = normalize(vec2f(nGeo.x, nGeo.z) + vec2f(1e-5, 0.0));
+  let wallUV = vec2f(dot(p, vec2f(-hz.y, hz.x)), y * 1.4);
+  let nvW = fbm(mix(p, wallUV, steep) / 8.0, vec2i(2048), 3, 0.55) + 0.5;
+  rock *= mix(mix(0.62, 1.12, crease), 0.92, steep * 0.75) * mix(0.8, 1.15, nvW);
   rock = mix(rock, rock * vec3f(0.80, 0.86, 1.05), highland * 0.0 + (1.0 - crease) * 0.25);
   // soil / dirt
   let dirt = mix(vec3f(0.30, 0.17, 0.13), vec3f(0.44, 0.27, 0.18), nv);
   // meadow ground: near camera it is the soil between blades, far it reads as the grass canopy
-  let canopy = meadowColor(p, nv, valley, highland);
+  let canopy = meadowColor(p, nv, valley, highland) * (0.9 + 0.3 * meadowWave(p));
   let under = canopy * 0.42 + dirt * 0.25;
   let grassC = mix(under, canopy, smoothstep(25.0, 120.0, dist));
   let sand = mix(vec3f(0.62, 0.50, 0.40), vec3f(0.76, 0.62, 0.50), nv);

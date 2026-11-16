@@ -108,10 +108,11 @@ fn baseHeight(p: vec2f) -> f32 {
   let hm = 1.0 - smoothstep(1500.0, 2100.0, hd);
   let mesa = 470.0 + fbm(q * 12.0, vec2i(12), 3, 0.5) * 90.0;
   let cn = abs(fbm(q * 18.0 + vec2f(0.37, 0.11), vec2i(18), 3, 0.42));
-  let canyon = 1.0 - smoothstep(0.022, 0.085, cn);
+  // (walls wide enough that each terrace riser spans several 4 m texels: no stair-stepped rims)
+  let canyon = 1.0 - smoothstep(0.02, 0.115, cn);
   var hh = mix(mesa, -14.0, pow(canyon, 0.8));
   // ledges on canyon walls
-  hh = mix(hh, terrace(hh, 44.0, 0.6), smoothstep(0.02, 0.2, canyon) * (1.0 - smoothstep(0.85, 1.0, canyon)));
+  hh = mix(hh, terrace(hh, 44.0, 0.72), smoothstep(0.02, 0.2, canyon) * (1.0 - smoothstep(0.85, 1.0, canyon)));
   // outlying buttes
   let bt = fbm(q * 36.0 + vec2f(0.9, 0.2), vec2i(36), 3, 0.5);
   let butte = smoothstep(0.15, 0.21, bt) * (1.0 - hm) * (1.0 - smoothstep(2300.0, 3600.0, hd)) * (1.0 - basin);
