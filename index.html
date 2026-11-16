@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ithra Vael — WebGPU Planet Explorer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: crosshair; }
+  #load { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font: 300 13px/1.6 system-ui, sans-serif; letter-spacing: .35em; color: #bfe9e6; background: radial-gradient(circle at 50% 60%, #102328 0%, #05070a 70%); transition: opacity 1.2s; }
+  #load h1 { font-weight: 200; font-size: 26px; letter-spacing: .6em; margin: 0 0 18px; color: #e9fbf7; }
+  #bar { width: 240px; height: 1px; background: #1d3b3e; margin-top: 14px; }
+  #bar i { display: block; height: 100%; width: 0; background: #7ff3e2; transition: width .3s; }
+  #help { position: fixed; right: 16px; bottom: 14px; font: 11px/1.55 system-ui, sans-serif; color: rgba(235,250,248,.78);
+    text-align: right; text-shadow: 0 1px 2px rgba(0,0,0,.65); pointer-events: none; letter-spacing: .04em; transition: opacity .6s; }
+  #help b { color: #fff; font-weight: 600; }
+  #err { position: fixed; left: 50%; top: 40%; transform: translateX(-50%); max-width: 520px; padding: 18px 22px; display: none;
+    font: 14px/1.5 system-ui, sans-serif; color: #fde; background: rgba(40,10,20,.9); border: 1px solid #a45; border-radius: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="load"><h1>ITHRA VAEL</h1><div id="msg">INITIALISING</div><div id="bar"><i></i></div></div>
+<div id="help">
+  <b>Click</b> to fly · <b>WASD</b> move · <b>Mouse</b> look · <b>Space/Ctrl</b> up/down · <b>Q/E</b> roll<br />
+  <b>Shift</b> boost · <b>Wheel</b> speed · <b>R</b> reset · <b>1 2 3</b> destinations · <b>M</b> metrics · <b>B</b> benchmark · <b>H</b> hide · <b>Esc</b> release
+</div>
+<div id="err"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
