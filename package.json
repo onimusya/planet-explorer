@@ -1,0 +1,19 @@
+{
+  "name": "planet-explorer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Procedural WebGPU alien planet exploration (native WebGPU + WGSL, no engine, no assets)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "size": "node scripts/size.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
