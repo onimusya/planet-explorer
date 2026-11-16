@@ -12,7 +12,7 @@ struct Species {
 };
 struct CullU {
   planes: array<vec4f, 5>,
-  sp: array<Species, 8>,
+  sp: array<Species, 12>,
   info: vec4f, // x = species count, y = draw count, z = distance scale
 };
 
@@ -22,6 +22,8 @@ struct CullU {
 @group(2) @binding(3) var<storage, read_write> inst: array<vec4f>;
 @group(2) @binding(4) var<storage, read> drawMap: array<u32>;
 @group(2) @binding(5) var<storage, read_write> indirect: array<u32>;
+// explicitly placed instances (landmarks, hero flora): (x, z, y offset over ground, scale), (yaw, seed, species, variant)
+@group(2) @binding(6) var<storage, read> marks: array<vec4f>;
 
 fn emit(list: u32, a: vec4f, b: vec4f) {
   let i = atomicAdd(&counts[list], 1u);
@@ -67,30 +69,58 @@ fn cull(@builtin(global_invocation_id) id: vec3u) {
   var scale = mix(S.c.x, S.c.y, h2.x * h2.x) * eco.scale;
   // shrink into the ground near the far limit (no popping)
   scale *= smoothstep(1.0, 0.86, dist / maxD);
-  let rad = S.c.z * scale;
-  let ctr = rel + vec3f(0.0, rad * 0.6, 0.0);
+  let nv = u32(S.a.w);
+  let variant = min(u32(h2.y * f32(nv)), nv - 1u);
+  place(s, rel, dist, vec4f(p.x, y, p.y, scale), vec4f(h2.z * TAU, h.x, f32(s), mix(1.0, S.d.z, h.y)), variant, false);
+}
+
+fn inFrustum(ctr: vec3f, rad: f32) -> bool {
   var vis = true;
   for (var k = 0; k < 5; k++) {
     let pl = CU.planes[k];
     if (dot(pl.xyz, ctr) + pl.w < -rad * length(pl.xyz)) { vis = false; }
   }
-  let nv = u32(S.a.w);
-  let variant = min(u32(h2.y * f32(nv)), nv - 1u);
-  let a = vec4f(p.x, y, p.y, scale);
-  let b = vec4f(h2.z * TAU, h.x, f32(s), mix(1.0, S.d.z, h.y));
-  if (vis) {
+  return vis;
+}
+
+// Visibility, LOD and shadow-list emission for one instance. The near shadow list feeds cascades
+// 0-1 and the far list cascades 2-3; instances in the band around the cascade-1 split go to both
+// so their shadows never fall into a cascade that skipped them. Landmarks (tall casters with
+// long low-sun shadows) are tested against each cascade footprint instead of by distance.
+fn place(s: u32, rel: vec3f, dist: f32, a: vec4f, b: vec4f, variant: u32, landmark: bool) {
+  let S = CU.sp[s];
+  let rad = S.c.z * a.w;
+  let ctr = rel + vec3f(0.0, rad * S.d.w, 0.0);
+  if (inFrustum(ctr, rad)) {
     var lod = 2u;
     let ld = dist / CU.info.z;
     if (ld < S.b.x) { lod = 0u; } else if (ld < S.b.y) { lod = 1u; }
     emit(u32(S.c.w) + variant * 3u + lod, a, b);
   }
-  if (dist < S.b.w * CU.info.z) {
-    let near = dist < S.b.z * CU.info.z;
-    let m = F.shadowMats[select(3, 1, near)];
-    if (inLight(m, ctr, rad)) {
-      emit(u32(S.d.x) + variant * 2u + select(1u, 0u, near), a, b);
-    }
+  let nearD = S.b.z * CU.info.z;
+  let farD = S.b.w * CU.info.z;
+  if (dist < nearD && inLight(F.shadowMats[1], ctr, rad)) { emit(u32(S.d.x) + variant * 2u, a, b); }
+  if (dist < farD && (landmark || dist >= F.cascadeSplits.y * 0.7) && inLight(F.shadowMats[3], ctr, rad)) {
+    emit(u32(S.d.x) + variant * 2u + 1u, a, b);
   }
+}
+
+@compute @workgroup_size(64)
+fn cullMarks(@builtin(global_invocation_id) id: vec3u) {
+  let n = arrayLength(&marks) / 2u;
+  if (id.x >= n) { return; }
+  let ma = marks[id.x * 2u];
+  let mb = marks[id.x * 2u + 1u];
+  let s = u32(mb.z);
+  let S = CU.sp[s];
+  let p = F.camPos.xz + wrapD2(ma.xy - F.camPos.xz);
+  let y = heightAt(p) + ma.z;
+  let rel = toRel(vec3f(p.x, y, p.y));
+  let dist = length(rel);
+  let maxD = S.a.z * max(CU.info.z, 0.8);
+  if (dist > maxD) { return; }
+  let scale = ma.w * smoothstep(1.0, 0.9, dist / maxD);
+  place(s, rel, dist, vec4f(p.x, y, p.y, scale), vec4f(mb.x, mb.y, mb.z, 1.0), u32(mb.w), true);
 }
 
 @compute @workgroup_size(64)

@@ -6,6 +6,7 @@ import { Post, type Targets } from './post';
 import { Metrics } from './metrics';
 import { Water } from './water';
 import { Vegetation } from './vegetation';
+import { buildMarks } from './landmarks';
 import { Grass } from './grass';
 import { Volume } from './volume';
 import { Camera } from './camera';
@@ -112,7 +113,7 @@ export class Renderer {
     await this.water.init();
     await this.vol.init();
     progress(0.95, 'Growing flora');
-    await this.veg.init();
+    await this.veg.init(buildMarks((x, z) => this.terrain.heightAt(x, z)));
     await this.grass.init();
     this.shadowTex = tex2d(device, SHADOW_SIZE, SHADOW_SIZE, 'depth32float', T.RENDER_ATTACHMENT | T.TEXTURE_BINDING, 'shadow', 1, CASCADES);
     // clear shadow layers once (until casters exist)

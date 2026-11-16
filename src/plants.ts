@@ -511,22 +511,55 @@ export function rockMesh(mb: MeshBuilder, center: V3, sc: V3, subdiv: number, se
     pl.push([[s * Math.cos(a), z * 0.85, s * Math.sin(a)], 0.7 + r() * 0.28]);
   }
   pl.push([[0, -1, 0], bottom]);
+  const pc = polyPiece(center, sc, subdiv, seed, pl);
+  rockSurface(mb, pc.pos, pc.f, Math.cbrt(sc[0] * sc[1] * sc[2]), 18,
+    (i) => 0.5 + 0.5 * Math.min(1, Math.max(0, (pc.pos[i][1] - center[1]) / sc[1] + 0.6)));
+}
+
+// Icosphere projected onto a convex polytope (soft-min over the planes' ray distances gives bevelled
+// edges; a sphere bound closes open directions), with fine relief, scale and an optional basis.
+interface Piece { pos: V3[]; f: number[] }
+function polyPiece(center: V3, sc: V3, subdiv: number, seed: number, pl: [V3, number][], basis?: [V3, V3, V3], relief = 0.05): Piece {
   const { v, f } = icosphere(subdiv);
   const k = 0.035;
+  const pn = pl.map(([n, h]) => [norm(n), h] as [V3, number]);
   const pos: V3[] = v.map((d) => {
-    // soft-min over plane distances along the ray d (bevelled edges); sphere bound for open directions
     let acc = Math.exp(-1.18 / k);
-    for (const [n, h] of pl) {
-      const c = dot(d, norm(n));
+    for (const [n, h] of pn) {
+      const c = dot(d, n);
       if (c > 1e-3) acc += Math.exp(-(h / c) / k);
     }
     let rad = -k * Math.log(acc);
-    rad *= 1 + 0.05 * fbm3(d[0] * 3.1 + seed, d[1] * 3.1, d[2] * 3.1, seed + 5, 4);
-    return add(center, [d[0] * rad * sc[0], d[1] * rad * sc[1], d[2] * rad * sc[2]]);
+    rad *= 1 + relief * fbm3(d[0] * 3.1 + seed, d[1] * 3.1, d[2] * 3.1, seed + 5, 4);
+    const l: V3 = [d[0] * rad * sc[0], d[1] * rad * sc[1], d[2] * rad * sc[2]];
+    if (!basis) return add(center, l);
+    return add(center, add(add(mul(basis[0], l[0]), mul(basis[1], l[1])), mul(basis[2], l[2])));
   });
-  const nr: V3[] = v.map(() => [0, 0, 0]);
-  const nsum: V3[] = v.map(() => [0, 0, 0]);
-  const ncnt = new Float32Array(v.length);
+  return { pos, f: f.slice() };
+}
+function mergePieces(ps: Piece[]): Piece {
+  const pos: V3[] = [], f: number[] = [];
+  for (const p of ps) { const o = pos.length; for (const q of p.pos) pos.push(q); for (const i of p.f) f.push(o + i); }
+  return { pos, f };
+}
+// random facet planes around a mean normal direction (y component fixed), jittered distance
+function facetRing(r: R, count: number, ny: number, h: number, jit: number): [V3, number][] {
+  const out: [V3, number][] = [];
+  const a0 = r() * 6.283;
+  for (let i = 0; i < count; i++) {
+    const a = a0 + (i / count) * 6.283 + (r() - 0.5) * 0.6;
+    const y = ny + (r() - 0.5) * 0.25;
+    out.push([[Math.cos(a), y, Math.sin(a)], h * (1 - jit * 0.5 + r() * jit)]);
+  }
+  return out;
+}
+
+// Shared finish for displaced rock surfaces: smooth face-weighted normals, convexity in the vertex
+// grad channel (worn ridges bright, creases dark) and a caller-supplied occlusion term.
+function rockSurface(mb: MeshBuilder, pos: V3[], f: number[], scl: number, cvGain: number, occl: (i: number) => number) {
+  const nr: V3[] = pos.map(() => [0, 0, 0]);
+  const nsum: V3[] = pos.map(() => [0, 0, 0]);
+  const ncnt = new Float32Array(pos.length);
   for (let i = 0; i < f.length; i += 3) {
     const a = pos[f[i]], b = pos[f[i + 1]], c = pos[f[i + 2]];
     const fn = cross(sub(b, a), sub(c, a));
@@ -538,18 +571,233 @@ export function rockMesh(mb: MeshBuilder, center: V3, sc: V3, subdiv: number, se
     }
   }
   const base = mb.count;
-  const scl = Math.cbrt(sc[0] * sc[1] * sc[2]);
-  for (let i = 0; i < v.length; i++) {
-    const d = v[i];
+  for (let i = 0; i < pos.length; i++) {
     const nn = norm(nr[i]);
-    const avg = mul(nsum[i], 1 / ncnt[i]);
+    const avg = mul(nsum[i], 1 / Math.max(ncnt[i], 1));
     const convex = dot(nn, sub(pos[i], avg)) / scl; // >0 on ridges, <0 in creases
-    const cv = Math.min(1, Math.max(0, 0.5 + convex * 18));
-    const u = Math.atan2(d[2], d[0]) / (2 * Math.PI) + 0.5;
-    const occl = 0.5 + 0.5 * Math.min(1, Math.max(0, (pos[i][1] - center[1]) / sc[1] + 0.6));
-    mb.v(pos[i], nn, u, d[1] * 0.5 + 0.5, PART.ROCK, 0, occl, cv);
+    const cv = Math.min(1, Math.max(0, 0.5 + convex * cvGain));
+    mb.v(pos[i], nn, 0.5, 0.5, PART.ROCK, 0, occl(i), cv);
   }
   for (let i = 0; i < f.length; i += 3) mb.tri(base + f[i], base + f[i + 1], base + f[i + 2]);
+}
+
+// Copy a generated mesh into another with a yaw / scale / offset (props on landmarks).
+function appendMesh(dst: MeshBuilder, src: MeshBuilder, off: V3, yaw: number, sc: number) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  const base = dst.count;
+  for (let i = 0; i < src.count; i++) {
+    const x = src.p[i * 3], y = src.p[i * 3 + 1], z = src.p[i * 3 + 2];
+    const nx = src.n[i * 3], ny = src.n[i * 3 + 1], nz = src.n[i * 3 + 2];
+    dst.v([off[0] + (x * c + z * s) * sc, off[1] + y * sc, off[2] + (-x * s + z * c) * sc], [nx * c + nz * s, ny, -nx * s + nz * c],
+      src.uv[i * 2], src.uv[i * 2 + 1], src.at[i * 4], src.at[i * 4 + 1], src.at[i * 4 + 2], src.at[i * 4 + 3]);
+  }
+  for (const i of src.opaque) dst.opaque.push(base + i);
+  for (const i of src.cutout) dst.cutout.push(base + i);
+}
+
+// -------------------------------------------------------------------------------------------
+// Landmarks (placed explicitly, see landmarks.ts). Mesh units are metres at instance scale 1.
+
+// Floating island: lobed meadow plateau over a tapering, ridged rock keel; hanging vines and a few
+// trees on top. Origin = centre of the rim; the keel hangs to about -D.
+const ISLE_R = 60;
+export const ISLE_TOP = (s: number) => ISLE_R * (0.1 * (1 - s * s) - 0.07 * Math.pow(s, 6));
+export function genIsland(seed: number, variant: number, lod: number): MeshBuilder {
+  const r = rng(seed * 911 + variant * 53 + 3);
+  const mb = new MeshBuilder();
+  const R = ISLE_R;
+  const D = R * (variant === 1 ? 1.25 : variant === 2 ? 0.6 : 0.85);
+  const elong = variant === 2 ? 1.45 : 1.0 + r() * 0.2;
+  const sd = lod === 0 ? 5 : lod === 1 ? 4 : 3;
+  const { v, f } = icosphere(sd);
+  const tip: V3 = [(r() - 0.5) * R * 0.5, 0, (r() - 0.5) * R * 0.5];
+  const ph1 = r() * 50, ph2 = r() * 50;
+  const rimAt = (th: number) => {
+    const cx = Math.cos(th), sz = Math.sin(th);
+    return R * (1 + 0.24 * fbm3(cx * 1.2 + ph1, 0.5, sz * 1.2, seed, 3) + 0.07 * fbm3(cx * 4 + ph2, 1.7, sz * 4, seed + 1, 2));
+  };
+  // rim cliff band over a shallow faceted bowl; the keel itself is a cluster of hanging polytope
+  // crags (an inverted crag field) plus a few loose floating rocks
+  const cliff = R * (variant === 2 ? 0.13 : 0.2);
+  const bowl = D * 0.4;
+  const tc = 0.24, q0 = 0.95;
+  const pos: V3[] = v.map((d) => {
+    const th = Math.atan2(d[2], d[0]);
+    const cx = Math.cos(th), sz = Math.sin(th);
+    const rim = rimAt(th);
+    const ex = cx * rim * elong, ez = sz * rim;
+    if (d[1] >= 0) {
+      const s = Math.sqrt(Math.max(0, 1 - d[1] * d[1])); // 0 centre .. 1 rim
+      const y = ISLE_TOP(s) + R * 0.02 * fbm3(ex * s * 0.04, 3.3, ez * s * 0.04, seed + 2, 3) * s;
+      return [ex * s, y, ez * s];
+    }
+    const t = -d[1];
+    if (t < tc) {
+      const k = t / tc;
+      const wob = 1 - (1 - q0) * k + 0.02 * fbm3(cx * 3, k * 2, sz * 3, seed + 8, 2);
+      return [ex * wob, -R * 0.07 - cliff * k, ez * wob];
+    }
+    const rq = (Math.sqrt(1 - t * t) / Math.sqrt(1 - tc * tc)) * q0;
+    const qx = cx * rq, qz = sz * rq;
+    const e = 1 - (rq / q0) * (rq / q0);
+    const rn = 1 - Math.abs(2 * fbm3(qx * 3 + ph2, 0.7, qz * 3, seed + 7, 3));
+    const dep = bowl * Math.pow(e, 1.1) * (0.75 + 0.5 * (fbm3(qx * 2 + ph1, 0.3, qz * 2, seed + 5, 3) + 0.5)) + D * 0.12 * rn * rn * Math.min(1, e * 3);
+    return [qx * rim * elong, -R * 0.07 - cliff - dep, qz * rim];
+  });
+  const pieces: Piece[] = [{ pos, f }];
+  const rc = rng(seed * 59 + variant * 11 + 5);
+  const nc = variant === 1 ? 5 : 8;
+  const csd = lod === 0 ? 3 : lod === 1 ? 2 : 1;
+  for (let i = 0; i < nc; i++) {
+    const big = i === 0;
+    const a = rc() * 6.283, dr = big ? rc() * 0.12 : 0.18 + rc() * 0.5;
+    const px = Math.cos(a) * dr * R * elong + tip[0] * 0.3, pz = Math.sin(a) * dr * R + tip[2] * 0.3;
+    const w = R * (big ? (variant === 1 ? 0.36 : 0.44) : 0.13 + rc() * 0.15);
+    const hh = D * (big ? (variant === 1 ? 1.6 : 1.05) : 0.32 + rc() * 0.5) * (1 - dr * 0.5);
+    const top = -R * 0.07 - cliff - bowl * Math.pow(1 - dr * dr, 1.1) * 0.55;
+    const pl = [...facetRing(rc, 6 + Math.floor(rc() * 3), 0.08, 0.82, 0.3), ...facetRing(rc, 4 + Math.floor(rc() * 2), -1.5, 0.66, 0.35)];
+    pl.push([[0, 1, 0], 0.95]);
+    const yaw = rc() * 6.283, lean = (rc() - 0.5) * 0.25;
+    if (lod === 2 && !big && w < R * 0.2) continue;
+    const bx: V3 = [Math.cos(yaw), 0, Math.sin(yaw)], bz: V3 = [-Math.sin(yaw), 0, Math.cos(yaw)];
+    const by: V3 = norm([lean * bx[0], 1, lean * bx[2]]);
+    pieces.push(polyPiece([px, top - hh * 0.42, pz], [w, hh * 0.52, w * (0.8 + rc() * 0.4)], csd, seed + 70 + i, pl, [bx, by, bz], 0.07));
+  }
+  if (lod < 2) {
+    // loose rocks drifting just under and beside the rim
+    for (let i = 0; i < (variant === 2 ? 3 : 5); i++) {
+      const a = rc() * 6.283, dr = 1.05 + rc() * 0.35;
+      const w = R * (0.04 + rc() * 0.06);
+      const pl = facetRing(rc, 7, 0.0, 0.8, 0.3).concat(facetRing(rc, 4, -1.2, 0.7, 0.3), facetRing(rc, 3, 1.2, 0.75, 0.3));
+      pieces.push(polyPiece([Math.cos(a) * dr * R * elong, -R * 0.07 - cliff * (0.5 + rc() * 2.5), Math.sin(a) * dr * R], [w, w * (0.9 + rc() * 0.8), w], csd, seed + 90 + i, pl, undefined, 0.08));
+    }
+  }
+  const all = mergePieces(pieces);
+  rockSurface(mb, all.pos, all.f, R * 0.5, 24, (i) => {
+    const y = all.pos[i][1];
+    return y > -R * 0.08 ? 1 : 0.38 + 0.47 * Math.max(0, 1 + (y + cliff) / (D * 1.8));
+  });  // hanging vines from the rim (own random streams so props stay put across LODs)
+  const rv = rng(seed * 37 + variant * 5 + 11);
+  const nv = lod === 0 ? 46 : lod === 1 ? 18 : 0;
+  for (let i = 0; i < nv; i++) {
+    const th = rv() * Math.PI * 2;
+    const rim = rimAt(th) * 1.004;
+    const p: V3 = [Math.cos(th) * rim * elong, -R * 0.075, Math.sin(th) * rim];
+    const L = R * (0.12 + rv() * rv() * 0.5);
+    const wv = 0.35 + rv() * 0.25;
+    const spine = curvePath(p, [Math.cos(th) * 0.06, -1, Math.sin(th) * 0.06], L, lod === 0 ? 8 : 4, [0, 0, 0], rv, 0.05);
+    const side: V3 = [-Math.sin(th), 0, Math.cos(th)];
+    mb.strip(spine, side, (t) => (1 - t * 0.55) * wv, PART.FROND, (t) => t, true, () => [Math.cos(th), 0, Math.sin(th)], 10);
+  }
+  // a few trees and fronds on the plateau
+  const rt = rng(seed * 41 + variant * 7 + 13);
+  const nt = variant === 1 ? 2 : 5;
+  for (let i = 0; i < nt; i++) {
+    const th = rt() * Math.PI * 2, s = 0.15 + rt() * 0.5, yaw = rt() * 6.283, ts = 0.55 + rt() * 0.25;
+    const rim = rimAt(th);
+    const x = Math.cos(th) * rim * elong * s, z = Math.sin(th) * rim * s;
+    if (lod === 2 && i >= 3) continue;
+    appendMesh(mb, genTree(seed + i * 17, i % 2, lod), [x, ISLE_TOP(s) - 0.6, z], yaw, ts);
+  }
+  if (lod === 0) {
+    const rs = rng(seed * 43 + variant * 3 + 17);
+    for (let i = 0; i < 14; i++) {
+      const th = rs() * Math.PI * 2, s = rs() * 0.8;
+      const rim = rimAt(th);
+      appendMesh(mb, genShrub(seed + i, i % 2, 1), [Math.cos(th) * rim * elong * s, ISLE_TOP(s) - 0.2, Math.sin(th) * rim * s], rs() * 6.283, 1.6 + rs());
+    }
+  }
+  return mb;
+}
+
+// Natural arch: elliptical rock section swept along a flattened half-superellipse, legs flaring
+// into the ground, horizontal erosion grooves. Origin = ground level between the legs.
+export function genArch(seed: number, variant: number, lod: number): MeshBuilder {
+  const mb = new MeshBuilder();
+  const W = variant === 1 ? 34 : variant === 2 ? 120 : 62;
+  const H = variant === 1 ? 58 : variant === 2 ? 40 : 44;
+  const thick = variant === 1 ? 4.6 : variant === 2 ? 9.5 : 6.5;
+  const depth = variant === 1 ? 6 : variant === 2 ? 17 : 9.5;
+  const segs = lod === 0 ? 72 : lod === 1 ? 32 : 14;
+  const sides = lod === 0 ? 28 : lod === 1 ? 14 : 7;
+  const drop = Math.max(14, H * 0.3);
+  const path: V3[] = [], legness: number[] = [];
+  const nLeg = Math.max(2, Math.round(segs * 0.1));
+  for (let i = 0; i < nLeg; i++) { path.push([-W / 2 - thick * 0.25, -drop * (1 - i / nLeg), 0]); legness.push(1); }
+  const ex = 2.6;
+  for (let i = 0; i <= segs; i++) {
+    const phi = Math.PI * (1 - i / segs);
+    const c = Math.cos(phi), s = Math.sin(phi);
+    const x = (W / 2) * Math.sign(c) * Math.pow(Math.abs(c), 2 / ex);
+    const y = H * Math.pow(s, 2 / ex);
+    path.push([x, y, 0]); legness.push(1 - Math.pow(s, 1.5));
+  }
+  for (let i = 1; i <= nLeg; i++) { path.push([W / 2 + thick * 0.25, -drop * (i / nLeg), 0]); legness.push(1); }
+  const n = path.length;
+  // weathering: asymmetric span, sagging/lumpy thickness along the arc, one heavier leg
+  const r = rng(seed * 577 + variant * 13 + 1);
+  const ph = r() * 20, heavy = r() < 0.5 ? -1 : 1;
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1), P = path[i];
+    path[i] = [P[0] + W * 0.07 * Math.sin(Math.PI * u) * heavy, P[1] * (1 + 0.08 * fbm3(u * 3 + ph, 0, 0, seed + 2, 2)), P[2] + W * 0.05 * fbm3(u * 2.5, ph, 0, seed + 3, 2)];
+  }
+  const pos: V3[] = [];
+  const f: number[] = [];
+  const B: V3 = [0, 0, 1];
+  for (let i = 0; i < n; i++) {
+    const T = norm(sub(path[Math.min(i + 1, n - 1)], path[Math.max(i - 1, 0)]));
+    const N = norm(cross(T, B));
+    const P = path[i];
+    const u = i / (n - 1);
+    const lg = legness[i];
+    const flare = 1 + 0.9 * Math.max(0, Math.min(1, (6 - P[1]) / (6 + drop)));
+    const lump = 0.78 + 0.5 * (fbm3(u * 5 + ph, 1.3, 0, seed + 5, 3) + 0.5);
+    const side = 1 + 0.22 * heavy * (u - 0.5) * 2 * lg;
+    const a = thick * (0.8 + 0.7 * lg) * flare * lump * side, b = depth * (0.85 + 0.35 * lg) * flare * (0.85 + 0.3 * lump) * side;
+    for (let j = 0; j < sides; j++) {
+      const al = (j / sides) * Math.PI * 2;
+      const dir = add(mul(N, Math.cos(al)), mul(B, Math.sin(al)));
+      let q = add(P, add(mul(N, a * Math.cos(al)), mul(B, b * Math.sin(al))));
+      const nz = fbm3(q[0] * 0.05, q[1] * 0.05, q[2] * 0.05, seed + 9, 4);
+      const groove = Math.sin(q[1] * 0.85 + 3 * fbm3(q[0] * 0.03, q[1] * 0.02, q[2] * 0.03, seed + 4, 2));
+      q = add(q, mul(dir, thick * (0.42 * nz + 0.05 * groove)));
+      pos.push(q);
+    }
+  }
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < sides; j++) {
+    const j1 = (j + 1) % sides;
+    const a = i * sides + j, b = i * sides + j1, c = (i + 1) * sides + j, d = (i + 1) * sides + j1;
+    f.push(a, c, b, b, c, d);
+  }
+  rockSurface(mb, pos, f, thick, 6, (i) => 0.55 + 0.45 * Math.min(1, Math.max(0, pos[i][1] / H + 0.2)));
+  return mb;
+}
+
+// Rock pillars: v0 stacked hoodoo with a cap rock, v1 spire cluster, v2 balanced rock.
+export function genPillar(seed: number, variant: number, lod: number): MeshBuilder {
+  const r = rng(seed * 313 + variant * 71);
+  const mb = new MeshBuilder();
+  const sd = lod === 0 ? 3 : lod === 1 ? 2 : 1;
+  if (variant === 0) {
+    let y = 0;
+    rockMesh(mb, [0, 1, 0], [11, 7, 10], sd, seed + 1, 10, 0.5);
+    for (let k = 0; k < 5; k++) {
+      const h = 6.5 + r() * 2.5, rad = 5.8 * (1 - 0.07 * k) * (0.85 + r() * 0.3);
+      rockMesh(mb, [(r() - 0.5) * 1.2, y + h * 0.5, (r() - 0.5) * 1.2], [rad, h * 0.62, rad * (0.85 + r() * 0.3)], sd, seed + 10 + k, 9, 0.85);
+      y += h * 0.92;
+    }
+    rockMesh(mb, [0.6, y + 2.2, -0.4], [9.5, 3.6, 8.2], sd, seed + 30, 11, 0.7);
+  } else if (variant === 1) {
+    rockMesh(mb, [0, 0, 0], [12, 6, 11], sd, seed + 2, 10, 0.5);
+    rockMesh(mb, [0, 24, 0], [5.5, 28, 5], sd + (lod < 2 ? 1 : 0), seed + 3, 12, 0.95);
+    rockMesh(mb, [6.5, 15, 3], [4.2, 18, 4], sd, seed + 4, 11, 0.95);
+    rockMesh(mb, [-5, 11, -4.5], [3.6, 13, 3.4], sd, seed + 5, 10, 0.95);
+  } else {
+    rockMesh(mb, [0, 0, 0], [9, 5, 8], sd, seed + 6, 10, 0.5);
+    rockMesh(mb, [0, 9, 0], [3.4, 10, 3.0], sd, seed + 7, 9, 0.95);
+    rockMesh(mb, [0.8, 22, 0.3], [12, 7.5, 9.5], sd + (lod < 2 ? 1 : 0), seed + 8, 12, 0.8);
+  }
+  return mb;
 }
 export function genBoulder(seed: number, variant: number, lod: number): MeshBuilder {
   const mb = new MeshBuilder();

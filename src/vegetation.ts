@@ -3,7 +3,7 @@ import cullSrc from './shaders/veg_cull.wgsl';
 import vegSrc from './shaders/veg.wgsl';
 import { L, bgl, buffer, bufferWith, computePipe, U } from './gpu';
 import type { Ctx } from './ctx';
-import { MeshBuilder, STRIDE, genTree, genMushroom, genCrystal, genFlower, genGlowpod, genShrub, genBoulder } from './plants';
+import { MeshBuilder, STRIDE, genTree, genMushroom, genCrystal, genFlower, genGlowpod, genShrub, genBoulder, genArch, genIsland, genPillar } from './plants';
 import { SEED } from './world';
 
 interface SpeciesDef {
@@ -11,7 +11,12 @@ interface SpeciesDef {
   variants: number; cell: number; grid: number; maxDist: number; lod0: number; lod1: number;
   shNear: number; shFar: number; smin: number; smax: number; radius: number; sink: number; ystretch: number;
   caps: [number, number, number]; shCaps: [number, number];
+  cy?: number; // bounding-sphere centre height as a fraction of the radius (default 0.6)
 }
+// Species with grid 0 are never scattered; they are only placed explicitly (landmarks.ts).
+export const SP = { TREE: 0, MUSHROOM: 1, CRYSTAL: 2, FLOWER: 3, GLOWPOD: 4, SHRUB: 5, BOULDER: 6, ARCH: 7, ISLAND: 8, PILLAR: 9 } as const;
+const MAXS = 12;
+const INFO = 20 + MAXS * 16;
 
 export const SPECIES: SpeciesDef[] = [
   { gen: genTree, variants: 3, cell: 8, grid: 320, maxDist: 1280, lod0: 95, lod1: 380, shNear: 130, shFar: 1100, smin: 1.25, smax: 1.95, radius: 9, sink: 0.5, ystretch: 1.18, caps: [2048, 6144, 16384], shCaps: [2048, 8192] },
@@ -21,6 +26,9 @@ export const SPECIES: SpeciesDef[] = [
   { gen: genGlowpod, variants: 2, cell: 4, grid: 96, maxDist: 190, lod0: 35, lod1: 100, shNear: 0, shFar: 0, smin: 1.0, smax: 1.9, radius: 1, sink: 0.05, ystretch: 1.3, caps: [4096, 4096, 4096], shCaps: [16, 16] },
   { gen: genShrub, variants: 2, cell: 4, grid: 128, maxDist: 250, lod0: 35, lod1: 110, shNear: 45, shFar: 0, smin: 1.0, smax: 1.9, radius: 1.5, sink: 0.05, ystretch: 1.2, caps: [4096, 8192, 8192], shCaps: [2048, 16] },
   { gen: genBoulder, variants: 3, cell: 8, grid: 192, maxDist: 760, lod0: 55, lod1: 220, shNear: 100, shFar: 600, smin: 0.4, smax: 2.4, radius: 2.6, sink: 0.6, ystretch: 1.0, caps: [2048, 4096, 8192], shCaps: [2048, 4096] },
+  { gen: genArch, variants: 3, cell: 1, grid: 0, maxDist: 9000, lod0: 320, lod1: 1500, shNear: 2500, shFar: 4500, smin: 1, smax: 1, radius: 85, sink: 0, ystretch: 1, caps: [16, 32, 64], shCaps: [32, 64], cy: 0.2 },
+  { gen: genIsland, variants: 3, cell: 1, grid: 0, maxDist: 14000, lod0: 520, lod1: 2200, shNear: 2500, shFar: 4500, smin: 1, smax: 1, radius: 125, sink: 0, ystretch: 1, caps: [16, 32, 96], shCaps: [32, 64], cy: -0.3 },
+  { gen: genPillar, variants: 3, cell: 1, grid: 0, maxDist: 8000, lod0: 260, lod1: 1100, shNear: 2500, shFar: 4500, smin: 1, smax: 1, radius: 42, sink: 0, ystretch: 1, caps: [32, 64, 128], shCaps: [64, 128], cy: 0.5 },
 ];
 
 interface MeshRec { baseVertex: number; opFirst: number; opCount: number; cutFirst: number; cutCount: number }
@@ -35,10 +43,13 @@ export class Vegetation {
   private drawMapBuf!: GPUBuffer;
   indirect!: GPUBuffer;
   private cullU!: GPUBuffer;
-  readonly cullData = new Float32Array(152);
+  readonly cullData = new Float32Array(INFO + 4);
+  private marksBuf!: GPUBuffer;
+  private nMarks = 0;
   private cullBG!: GPUBindGroup;
   private pReset!: GPUComputePipeline;
   private pCull!: GPUComputePipeline;
+  private pMarks!: GPUComputePipeline;
   private pFinal!: GPUComputePipeline;
   private pOpaque!: GPURenderPipeline;
   private pCut!: GPURenderPipeline;
@@ -58,7 +69,7 @@ export class Vegetation {
 
   constructor(private ctx: Ctx) {}
 
-  async init() {
+  async init(marks: Float32Array) {
     const { device } = this.ctx;
     // ---- meshes ----
     const meshes: MeshRec[][][] = [];
@@ -164,18 +175,21 @@ export class Vegetation {
       cd[o] = sd.cell; cd[o + 1] = sd.grid; cd[o + 2] = sd.maxDist; cd[o + 3] = sd.variants;
       cd[o + 4] = sd.lod0; cd[o + 5] = sd.lod1; cd[o + 6] = sd.shNear; cd[o + 7] = sd.shFar;
       cd[o + 8] = sd.smin; cd[o + 9] = sd.smax; cd[o + 10] = sd.radius; cd[o + 11] = base[s];
-      cd[o + 12] = shBase[s]; cd[o + 13] = sd.sink; cd[o + 14] = sd.ystretch; cd[o + 15] = 0;
+      cd[o + 12] = shBase[s]; cd[o + 13] = sd.sink; cd[o + 14] = sd.ystretch; cd[o + 15] = sd.cy ?? 0.6;
     }
-    cd[148] = SPECIES.length; cd[149] = nd; cd[150] = 1;
+    cd[INFO] = SPECIES.length; cd[INFO + 1] = nd; cd[INFO + 2] = 1;
+    this.nMarks = marks.length / 8;
+    this.marksBuf = bufferWith(device, marks.length ? marks : new Float32Array(8), U.STORAGE, 'vegMarks');
 
     // ---- pipelines ----
     const C = GPUShaderStage.COMPUTE;
-    const cl = bgl(device, [L.uniform(0, C), L.storageRO(1, C), L.storage(2), L.storage(3), L.storageRO(4, C), L.storage(5)]);
+    const cl = bgl(device, [L.uniform(0, C), L.storageRO(1, C), L.storage(2), L.storage(3), L.storageRO(4, C), L.storage(5), L.storageRO(6, C)]);
     const cmod = await this.ctx.module(cullSrc, 'veg_cull');
     const fb = this.ctx.frameBGL, wb = this.ctx.worldBGL;
-    [this.pReset, this.pCull, this.pFinal] = await Promise.all([
+    [this.pReset, this.pCull, this.pMarks, this.pFinal] = await Promise.all([
       computePipe(device, cmod, 'reset', [fb, wb, cl]),
       computePipe(device, cmod, 'cull', [fb, wb, cl]),
+      computePipe(device, cmod, 'cullMarks', [fb, wb, cl]),
       computePipe(device, cmod, 'finalize', [fb, wb, cl]),
     ]);
     this.cullBG = device.createBindGroup({ layout: cl, entries: [
@@ -185,6 +199,7 @@ export class Vegetation {
       { binding: 3, resource: { buffer: this.inst } },
       { binding: 4, resource: { buffer: this.drawMapBuf } },
       { binding: 5, resource: { buffer: this.indirect } },
+      { binding: 6, resource: { buffer: this.marksBuf } },
     ] });
     this.cascadeBGL = bgl(device, [L.uniform(0, GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT)]);
     for (let c = 0; c < 4; c++) {
@@ -243,7 +258,7 @@ export class Vegetation {
 
   setPlanes(planes: Float64Array, distScale: number) {
     for (let i = 0; i < 20; i++) this.cullData[i] = planes[i];
-    this.cullData[150] = distScale;
+    this.cullData[INFO + 2] = distScale;
     this.ctx.device.queue.writeBuffer(this.cullU, 0, this.cullData);
   }
 
@@ -255,6 +270,10 @@ export class Vegetation {
     pass.dispatchWorkgroups(Math.ceil(this.nLists / 64));
     pass.setPipeline(this.pCull);
     pass.dispatchWorkgroups(Math.ceil(this.maxGrid / 8), Math.ceil(this.maxGrid / 8), SPECIES.length);
+    if (this.nMarks > 0) {
+      pass.setPipeline(this.pMarks);
+      pass.dispatchWorkgroups(Math.ceil(this.nMarks / 64));
+    }
     pass.setPipeline(this.pFinal);
     pass.dispatchWorkgroups(Math.ceil(this.draws.length / 64));
   }

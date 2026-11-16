@@ -142,6 +142,7 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
   } else if (part == 8.0) { // fronds
     var c = hue(seed, vec3f(0.42, 0.06, 0.16), vec3f(0.55, 0.12, 0.24), vec3f(0.52, 0.30, 0.08));
     if (sp == 0.0) { c = hue(seed, vec3f(0.05, 0.30, 0.26), vec3f(0.10, 0.40, 0.34), vec3f(0.30, 0.42, 0.12)); }
+    if (sp == 8.0) { c = hue(seed, vec3f(0.05, 0.13, 0.08), vec3f(0.10, 0.17, 0.06), vec3f(0.14, 0.08, 0.13)); } // island vines
     c = mix(c, vec3f(0.04, 0.24, 0.30), valley * 0.8);
     let mid = 1.0 - abs(uv.x - 0.5) * 2.0;
     m.alb = c * (0.55 + 0.5 * grad) * (0.8 + 0.3 * mid);
@@ -191,7 +192,7 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.trans = 1.0;
   } else { // rock: local strata geology, worn bright edges, dark crevices (grad = convexity)
     let n1 = fbm3(wp * 0.7 + seed * 13.0, 3);
-    var r = strata(wp.y, wp.xz) * (0.78 + 0.45 * n1);
+    var r = strata(wp.y, wp.xz) * (0.78 + 0.45 * n1) * (0.86 + 0.3 * fbm3(wp * 0.035 + seed * 3.0, 2));
     r *= mix(0.55, 1.18, smoothstep(0.15, 0.85, grad));
     m.alb = r;
     m.rough = 0.78;
@@ -236,7 +237,9 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
     let a = attrAt(in.world.xz);
     let dustN = fbm3(in.world * 0.9, 2);
     let up = smoothstep(0.6, 0.95, n.y + dustN * 0.35);
-    let soil = mix(vec3f(0.36, 0.22, 0.16), meadowColor(in.world.xz, 0.5 + dustN, valley, highlandMask(in.world.xz)) * 0.55, smoothstep(0.2, 0.5, a.y));
+    // floating-island plateaus are always turfed, whatever lies on the ground below them
+    let lushF = select(smoothstep(0.2, 0.5, a.y), 1.0, sp == 8.0);
+    let soil = mix(vec3f(0.36, 0.22, 0.16), meadowColor(in.world.xz, 0.5 + dustN, valley, highlandMask(in.world.xz)) * 0.55, lushF);
     m.alb = mix(m.alb, soil, up * 0.75);
     m.rough = mix(m.rough, 0.92, up);
   }
