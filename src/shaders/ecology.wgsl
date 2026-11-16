@@ -32,10 +32,12 @@ fn ecology(s: u32, p: vec2f, h: f32) -> Eco {
       o.scale = 0.8 + valley * 0.9 * smoothstep(-0.1, 0.3, grove);
     }
     case 2u: {
-      // crystal outcrops on rocky highland slopes and ledges
-      let rocky = smoothstep(0.15, 0.6, slope + a.w * 0.6);
-      o.dens = high * (0.25 + 0.6 * rocky) * smoothstep(-0.1, 0.15, patchN) + a.w * 0.04 + valley * 0.06 * rocky;
-      o.scale = 0.8 + high * 0.6 * rocky;
+      // crystal outcrops: a few large clusters on highland ledges, never on steep walls
+      let rocky = smoothstep(0.1, 0.45, slope + a.w * 0.6);
+      let steepCut = 1.0 - smoothstep(0.5, 0.75, slope);
+      let clump = smoothstep(0.14, 0.32, patchN + grove * 0.25);
+      o.dens = (high * (0.18 + 0.4 * rocky) * clump + a.w * 0.012 + valley * 0.025 * rocky) * steepCut;
+      o.scale = (1.15 + high * 0.75 * clump) * mix(0.8, 1.2, rocky);
     }
     case 3u: {
       // sunbloom flowers in open meadows, clustered

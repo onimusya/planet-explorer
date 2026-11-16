@@ -9,6 +9,8 @@
 @group(1) @binding(5) var apLut: texture_3d<f32>;
 @group(1) @binding(6) var<storage, read> ambSH: array<vec4f, 9>;
 @group(1) @binding(7) var noiseTex: texture_3d<f32>; // 128^3 tiling noise (r: perlin-worley, gba: worley fbm)
+@group(1) @binding(8) var weatherTex: texture_2d<f32>; // cloud weather map over WORLD_L: r coverage, g type
+@group(1) @binding(9) var fTex: texture_2d<f32>;       // coarse mipmapped (height, shadow height, occluder dist)
 
 const TEXEL: f32 = WORLD_L / f32(HMAP_N);
 
@@ -61,6 +63,12 @@ fn heightCubic(p: vec2f) -> f32 {
 fn wuv(p: vec2f) -> vec2f { return (p / TEXEL + 0.5) / f32(HMAP_N); }
 fn gradAt(p: vec2f) -> vec2f { return textureSampleLevel(gTex, sLinRep, wuv(p), 0.0).xy; }
 fn attrAt(p: vec2f) -> vec4f { return textureSampleLevel(aTex, sLinRep, wuv(p), 0.0); }
+// Coarse (16 m, mipmapped) height / sun-shadow height / occluder distance for volumetrics.
+fn fieldAt(p: vec2f, lod: f32) -> vec3f { return textureSampleLevel(fTex, sLinRep, wuv(p), lod).xyz; }
+fn fieldShadow(f: vec3f, y: f32) -> f32 {
+  let w = 2.0 + f.z * 0.008;
+  return smoothstep(-w, w, y - f.y);
+}
 fn normalAt(p: vec2f) -> vec3f {
   let g = gradAt(p);
   return normalize(vec3f(-g.x, 1.0, -g.y));
@@ -117,18 +125,53 @@ fn highlandMask(p: vec2f) -> f32 { return 1.0 - smoothstep(2000.0, 3600.0, regio
 
 // ---------------------------------------------------------------------------------------------
 // Cloud coverage (shared by volumetric clouds and terrain cloud shadows). Periodic over WORLD_L.
-fn cloudWind() -> vec2f { return vec2f(9.0, 4.0) * time(); }
-fn cloudCoverage(xz: vec2f) -> f32 {
-  let q = (xz + cloudWind()) / WORLD_L;
-  let n = fbm(q * 6.0, vec2i(6), 4, 0.55);
-  let big = fbm(q * 2.0 + vec2f(3.7, 1.3), vec2i(2), 2, 0.5);
-  return sat(n * 1.6 + big * 0.9 + CLOUD_COVER);
+fn cloudWind() -> vec2f { return vec2f(6.0, 2.5) * time(); }
+// (coverage, type) of the cloud layer above world xz; the vista's sun path is kept clear.
+fn cloudWeather(xz: vec2f) -> vec2f {
+  let w = textureSampleLevel(weatherTex, sLinRep, (xz + cloudWind()) / WORLD_L, 0.0).rg;
+  let clear = smoothstep(1500.0, 4000.0, length(wrapD2(xz - VISTA_SUNCLEAR)));
+  return vec2f(sat(w.x + CLOUD_COVER) * clear, w.y);
 }
+fn cloudCoverage(xz: vec2f) -> f32 { return cloudWeather(xz).x; }
 // Approximate cloud shadow for a world point (projects along the sun ray to the cloud layer).
 fn cloudShadow(p: vec3f) -> f32 {
   let mid = 0.5 * (CLOUD_BOT + CLOUD_TOP);
   let t = max(mid - p.y, 0.0) / max(F.sunDir.y, 0.05);
   let q = p.xz + F.sunDir.xz * t;
   let c = cloudCoverage(q);
-  return 1.0 - 0.75 * smoothstep(0.35, 0.8, c);
+  return 1.0 - 0.8 * smoothstep(0.25, 0.7, c);
 }
+
+// Roots of alt(t) = H along a camera-relative ray in the curved-world convention
+// alt(t) = camY + t*d.y + t^2*|d.xz|^2/(2R). Returns (t0, t1), t0 <= t1, or (-1, -1).
+fn shellRoots(d: vec3f, H: f32) -> vec2f {
+  let a = dot(d.xz, d.xz) * (0.5 / PLANET_R);
+  let b = d.y;
+  let c = F.camPos.y - H;
+  if (a < 1e-12) {
+    let t = -c / select(b, 1e-6, abs(b) < 1e-6);
+    return vec2f(t, t);
+  }
+  let disc = b * b - 4.0 * a * c;
+  if (disc < 0.0) { return vec2f(-1.0); }
+  let q = -0.5 * (b + select(-1.0, 1.0, b >= 0.0) * sqrt(disc));
+  let r1 = q / a;
+  let r2 = c / select(q, -1e-9, abs(q) < 1e-9);
+  return vec2f(min(r1, r2), max(r1, r2));
+}
+
+// Distance interval of a view ray inside the cloud slab (x < 0: no intersection).
+fn cloudSpan(d: vec3f) -> vec2f {
+  let y = F.camPos.y;
+  let rt = shellRoots(d, CLOUD_TOP);
+  if (y < CLOUD_BOT) {
+    let rb = shellRoots(d, CLOUD_BOT);
+    return vec2f(rb.y, rt.y);
+  }
+  if (y <= CLOUD_TOP) { return vec2f(0.0, rt.y); }
+  if (rt.y <= 0.0) { return vec2f(-1.0); }
+  return vec2f(max(rt.x, 0.0), rt.y);
+}
+
+// Altitude (heightmap convention) of a camera-relative point on the curved world.
+fn altOf(rel: vec3f) -> f32 { return F.camPos.y + rel.y + curveDrop(rel.xz); }

@@ -1,6 +1,7 @@
 // Atmosphere LUTs (transmittance, multi-scattering, sky-view, aerial perspective, ambient SH).
 import src from './shaders/atmo_luts.wgsl';
 import noiseSrc from './shaders/noise3d.wgsl';
+import weatherSrc from './shaders/weather.wgsl';
 import { L, bgl, buffer, computePipe, tex2d, tex3d, U, T } from './gpu';
 import type { Ctx } from './ctx';
 
@@ -11,6 +12,7 @@ export class Atmosphere {
   ap!: GPUTexture;
   shBuf!: GPUBuffer;
   noise!: GPUTexture;
+  weather!: GPUTexture;
   private pTrans!: GPUComputePipeline;
   private pMs!: GPUComputePipeline;
   private pSky!: GPUComputePipeline;
@@ -60,12 +62,21 @@ export class Atmosphere {
     const ln = bgl(device, [L.stTex(0, 'rgba8unorm', '3d')]);
     const pN = await computePipe(device, nmod, 'main', [fb, ln]);
     const bgN = device.createBindGroup({ layout: ln, entries: [{ binding: 0, resource: this.noise.createView() }] });
+    // cloud weather map (generated once)
+    this.weather = tex2d(device, 512, 512, 'rgba8unorm', S, 'weather');
+    const wmod = await this.ctx.module(weatherSrc, 'weather');
+    const lw = bgl(device, [L.stTex(0, 'rgba8unorm')]);
+    const pW = await computePipe(device, wmod, 'main', [fb, lw]);
+    const bgW = device.createBindGroup({ layout: lw, entries: [{ binding: 0, resource: this.weather.createView() }] });
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setBindGroup(0, this.ctx.frameBG);
     pass.setPipeline(pN);
     pass.setBindGroup(1, bgN);
     pass.dispatchWorkgroups(32, 32, 32);
+    pass.setPipeline(pW);
+    pass.setBindGroup(1, bgW);
+    pass.dispatchWorkgroups(64, 64);
     pass.end();
     device.queue.submit([enc.finish()]);
   }

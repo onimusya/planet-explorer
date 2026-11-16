@@ -299,3 +299,30 @@ fn genMinMax(@builtin(global_invocation_id) id: vec3u) {
   }
   minmax[id.y * u32(B) + id.x] = vec2f(mn, mx);
 }
+
+// Coarse fields for volumetrics (1/4 resolution, mipmapped): mean height, mean sun-shadow
+// height, mean occluder distance. Same normalised uv convention as the full-res maps.
+@compute @workgroup_size(8, 8)
+fn genCoarse(@builtin(global_invocation_id) id: vec3u) {
+  let o = vec2i(id.xy) * 4;
+  var s = vec3f(0.0);
+  for (var y = 0; y < 4; y++) {
+    for (var x = 0; x < 4; x++) {
+      let q = o + vec2i(x, y);
+      s += vec3f(textureLoad(inA, q, 0).r, textureLoad(inB, q, 0).zw);
+    }
+  }
+  textureStore(outRGBA16, vec2i(id.xy), vec4f(s / 16.0, 1.0));
+}
+
+@compute @workgroup_size(8, 8)
+fn genCoarseMip(@builtin(global_invocation_id) id: vec3u) {
+  let dims = vec2i(textureDimensions(inB, 0));
+  let o = vec2i(id.xy) * 2;
+  if (o.x >= dims.x || o.y >= dims.y) { return; }
+  var s = vec4f(0.0);
+  for (var k = 0; k < 4; k++) {
+    s += textureLoad(inB, min(o + vec2i(k & 1, k >> 1), dims - 1), 0);
+  }
+  textureStore(outRGBA16, vec2i(id.xy), s * 0.25);
+}

@@ -65,20 +65,24 @@ export class MeshBuilder {
         this.v(add(path[i], mul(dir, radius[i])), dir, j / sides, (vacc * vScale) % 64, part, flexOf(t), aoOf(t), t);
       }
     }
+    // counter-clockwise seen from outside (front faces match the outward normals)
     for (let i = 0; i < n - 1; i++) for (let j = 0; j < sides; j++) {
       const a = start + i * (sides + 1) + j, b = a + 1, c = a + sides + 1, d = c + 1;
-      this.tri(a, c, b); this.tri(b, c, d);
+      this.tri(a, b, c); this.tri(b, d, c);
     }
     if (cap) {
       const tip = this.v(add(path[n - 1], mul(tan, radius[n - 1] * 0.6)), tan, 0.5, 0, part, flexOf(1), aoOf(1), 1);
       const base = start + (n - 1) * (sides + 1);
-      for (let j = 0; j < sides; j++) this.tri(base + j, tip, base + j + 1);
+      for (let j = 0; j < sides; j++) this.tri(base + j, base + j + 1, tip);
     }
     return start;
   }
 
   // Surface of revolution around +Y: profile [r, y] pairs, with explicit normals derived from the profile.
-  lathe(profile: [number, number][], sides: number, center: V3, part: number, flexOf: (t: number) => number, ao: (t: number) => number, flip = false, tilt: V3 = [0, 1, 0]) {
+  // The normal is the right-hand side of the profile direction ((dy, -dr): outward for bottom-to-top
+  // profiles); flip selects the left-hand side (axis-to-rim cap tops). Winding always matches the normal.
+  // rmod(angle, r / rRef) optionally scales the radius per angle (lobed rims).
+  lathe(profile: [number, number][], sides: number, center: V3, part: number, flexOf: (t: number) => number, ao: (t: number) => number, flip = false, tilt: V3 = [0, 1, 0], rmod?: (a: number, rf: number) => number, rRef = 1) {
     const start = this.count;
     const up = norm(tilt);
     const ref: V3 = Math.abs(up[1]) < 0.95 ? [0, 1, 0] : [1, 0, 0];
@@ -98,14 +102,15 @@ export class MeshBuilder {
         const a = (j / sides) * Math.PI * 2;
         const ca = Math.cos(a), sa = Math.sin(a);
         const radial = add(mul(ex, ca), mul(ez, sa));
-        const pos = add(center, add(mul(radial, r), mul(up, y)));
+        const k = rmod ? rmod(a, r / rRef) : 1;
+        const pos = add(center, add(mul(radial, r * k), mul(up, y)));
         const nrm = add(mul(radial, pn[0]), mul(up, pn[1]));
         this.v(pos, nrm, j / sides, t, part, flexOf(t), ao(t), t);
       }
     }
     for (let i = 0; i < m - 1; i++) for (let j = 0; j < sides; j++) {
       const a = start + i * (sides + 1) + j, b = a + 1, c = a + sides + 1, d = c + 1;
-      if (flip) { this.tri(a, b, c); this.tri(b, d, c); } else { this.tri(a, c, b); this.tri(b, c, d); }
+      if (flip) { this.tri(a, c, b); this.tri(b, c, d); } else { this.tri(a, b, c); this.tri(b, d, c); }
     }
   }
 
@@ -329,31 +334,42 @@ export function genTree(seed: number, variant: number, lod: number): MeshBuilder
 export function genMushroom(seed: number, variant: number, lod: number): MeshBuilder {
   const r = rng(seed * 4513 + variant * 7907);
   const mb = new MeshBuilder();
-  const sides = lod === 0 ? 20 : lod === 1 ? 10 : 6;
+  const sides = lod === 0 ? 48 : lod === 1 ? 18 : 8;
   const make = (base: V3, H: number, capR: number, shape: number, lean: V3) => {
     const segs = lod === 0 ? 10 : lod === 1 ? 5 : 3;
     const stem = curvePath(base, add([0, 1, 0], lean), H, segs, [lean[0] * 2, 0, lean[2] * 2], r, 0.03);
     const rb = capR * 0.16;
-    mb.tube(stem, stem.map((_, i) => { const t = i / (stem.length - 1); return rb * (1 + 1.4 * Math.pow(1 - t, 4)) * (1 - 0.25 * t); }), Math.max(5, sides / 2), PART.STEM, (t) => t * 0.35, (t) => 0.5 + 0.5 * t);
+    mb.tube(stem, stem.map((_, i) => { const t = i / (stem.length - 1); return rb * (1 + 1.4 * Math.pow(1 - t, 4)) * (1 - 0.25 * t); }), Math.max(6, sides / 3), PART.STEM, (t) => t * 0.35, (t) => 0.5 + 0.5 * t);
     const top = stem[stem.length - 1];
     const tilt = norm(sub(top, stem[stem.length - 2]));
-    const n = lod === 0 ? 12 : lod === 1 ? 7 : 4;
+    const n = lod === 0 ? 14 : lod === 1 ? 7 : 4;
     const prof: [number, number][] = [];
-    const under: [number, number][] = [];
     for (let i = 0; i <= n; i++) {
       const t = i / n;
       let rr: number, y: number;
-      if (shape === 0) { rr = capR * Math.sin(t * Math.PI * 0.5); y = capR * 0.55 * Math.cos(t * Math.PI * 0.5) - capR * 0.12 * t * t; }
-      else if (shape === 1) { rr = capR * t; y = capR * 0.22 * (1 - t * t) + capR * 0.1 * Math.pow(t, 6); }
+      if (shape === 0) { rr = capR * Math.sin(t * Math.PI * 0.5); y = capR * 0.6 * Math.cos(t * Math.PI * 0.5) - capR * 0.12 * t * t; }
+      else if (shape === 1) { rr = capR * t; y = capR * (0.34 * (1 - t * t) + 0.07 * Math.exp(-t * t * 16)); }
       else { rr = capR * 0.8 * Math.sin(t * Math.PI * 0.55); y = capR * 0.9 * Math.cos(t * Math.PI * 0.5) - capR * 0.35 * t; }
       prof.push([rr, y]);
     }
-    for (let i = 0; i <= Math.max(2, n >> 1); i++) {
-      const t = i / Math.max(2, n >> 1);
-      under.push([capR * (0.12 + 0.86 * t), prof[prof.length - 1][1] * t * 0.9 - capR * 0.04 * (1 - t)]);
+    // rolled lip at the rim
+    const [er, ey] = prof[prof.length - 1];
+    if (lod < 2) { prof.push([er * 1.012, ey - capR * 0.045]); prof.push([er * 0.975, ey - capR * 0.08]); }
+    const [lr, ly] = prof[prof.length - 1];
+    // gills: from the stem top out to the inside of the lip, facing down
+    const under: [number, number][] = [];
+    const nu = Math.max(2, n >> 1);
+    const y0 = prof[0][1] * 0.42;
+    for (let i = 0; i <= nu; i++) {
+      const t = i / nu;
+      under.push([rb * 0.9 + (lr - rb * 0.9) * t, y0 + (ly - y0) * Math.pow(t, 0.85)]);
     }
-    mb.lathe(prof, sides, add(top, mul(tilt, -0.05)), PART.CAP, () => 0.25, (t) => 0.8 + 0.2 * (1 - t), false, tilt);
-    mb.lathe(under, sides, add(top, mul(tilt, -0.05)), PART.GILL, () => 0.25, () => 0.6, true, tilt);
+    // gently lobed rim (+-6%), identical on cap and gills so the lip stays closed
+    const lobes = 5 + Math.floor(r() * 4), ph = r() * 6.283;
+    const rmod = (a: number, rf: number) => 1 + 0.06 * Math.sin(a * lobes + ph) * rf * rf;
+    const c = add(top, mul(tilt, -0.05));
+    mb.lathe(prof, sides, c, PART.CAP, () => 0.25, (t) => 0.8 + 0.2 * (1 - t), true, tilt, rmod, capR);
+    mb.lathe(under, sides, c, PART.GILL, () => 0.25, () => 0.6, false, tilt, rmod, capR);
   };
   if (variant === 0) {
     make([0, -0.3, 0], 8 + r() * 3, 4.5 + r() * 1.5, 1, [0.08, 0, 0.05]);
@@ -385,29 +401,30 @@ export function genCrystal(seed: number, variant: number, lod: number): MeshBuil
     const base: V3 = [Math.cos(ang) * rad * 1.5 * (big ? 0 : 1), -0.3, Math.sin(ang) * rad * 1.5 * (big ? 0 : 1)];
     const ref: V3 = Math.abs(axis[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
     const ex = norm(cross(ref, axis)), ez = cross(axis, ex);
-    const ring = (h: number, rr: number) => {
-      const pts: V3[] = [];
-      for (let k = 0; k < 6; k++) {
-        const a = (k / 6) * Math.PI * 2 + 0.3;
-        pts.push(add(add(base, mul(axis, h)), add(mul(ex, Math.cos(a) * rr), mul(ez, Math.sin(a) * rr))));
-      }
-      return pts;
+    // irregular hexagonal prism: per-edge radius and termination height jitter
+    const rj: number[] = [], hj: number[] = [];
+    for (let k = 0; k < 6; k++) { rj.push(0.78 + r() * 0.44); hj.push(0.66 + r() * 0.2); }
+    const at = (k: number, h: number, rr: number): V3 => {
+      const a = (k / 6) * Math.PI * 2 + 0.3;
+      return add(add(base, mul(axis, h)), add(mul(ex, Math.cos(a) * rr), mul(ez, Math.sin(a) * rr)));
     };
-    const b0 = ring(0, rad * 0.9), b1 = ring(H * 0.78, rad), tip = add(base, mul(axis, H));
+    const b0: V3[] = [], b1: V3[] = [];
+    for (let k = 0; k < 6; k++) { b0.push(at(k, 0, rad * 0.9 * rj[k])); b1.push(at(k, H * hj[k], rad * rj[k])); }
+    const tip = add(add(base, mul(axis, H)), add(mul(ex, (r() - 0.5) * rad * 0.5), mul(ez, (r() - 0.5) * rad * 0.5)));
     for (let k = 0; k < 6; k++) {
       const k1 = (k + 1) % 6;
-      const fn = norm(cross(sub(b1[k], b0[k]), sub(b0[k1], b0[k])));
-      const g0 = 0, g1 = 0.78;
-      const a = mb.v(b0[k], fn, 0, 0, PART.CRYSTAL, 0, 0.55, g0);
-      const b = mb.v(b0[k1], fn, 1, 0, PART.CRYSTAL, 0, 0.55, g0);
-      const c = mb.v(b1[k1], fn, 1, 0.78, PART.CRYSTAL, 0, 1, g1);
-      const d = mb.v(b1[k], fn, 0, 0.78, PART.CRYSTAL, 0, 1, g1);
-      mb.tri(a, d, b); mb.tri(b, d, c);
-      const tn = norm(cross(sub(tip, b1[k]), sub(b1[k1], b1[k])));
-      const e = mb.v(b1[k], tn, 0, 0.78, PART.CRYSTAL, 0, 1, g1);
-      const f = mb.v(b1[k1], tn, 1, 0.78, PART.CRYSTAL, 0, 1, g1);
+      // outward face normals, counter-clockwise from outside
+      const fn = norm(cross(sub(b0[k1], b0[k]), sub(b1[k], b0[k])));
+      const a = mb.v(b0[k], fn, 0, 0, PART.CRYSTAL, 0, 0.55, 0);
+      const b = mb.v(b0[k1], fn, 1, 0, PART.CRYSTAL, 0, 0.55, 0);
+      const c = mb.v(b1[k1], fn, 1, hj[k1], PART.CRYSTAL, 0, 1, hj[k1]);
+      const d = mb.v(b1[k], fn, 0, hj[k], PART.CRYSTAL, 0, 1, hj[k]);
+      mb.tri(a, b, d); mb.tri(b, c, d);
+      const tn = norm(cross(sub(b1[k1], b1[k]), sub(tip, b1[k])));
+      const e = mb.v(b1[k], tn, 0, hj[k], PART.CRYSTAL, 0, 1, hj[k]);
+      const f = mb.v(b1[k1], tn, 1, hj[k1], PART.CRYSTAL, 0, 1, hj[k1]);
       const g = mb.v(tip, tn, 0.5, 1, PART.CRYSTAL, 0, 1, 1);
-      mb.tri(e, g, f);
+      mb.tri(e, f, g);
     }
   }
   return mb;

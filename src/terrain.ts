@@ -17,6 +17,7 @@ export class Terrain {
   hTex!: GPUTexture;
   gTex!: GPUTexture;
   aTex!: GPUTexture;
+  fTex!: GPUTexture; // coarse (1/4 res, mipmapped) height / shadow height / occluder distance
   cpuGrid = new Float32Array(CPU_N * CPU_N);
   private pyr: Float32Array[] = []; // min/max pyramid, level 0 = 256 m blocks
   pipeline!: GPURenderPipeline;
@@ -72,14 +73,18 @@ export class Terrain {
       attr: bgl(device, [E.inA, E.outRGBA8, E.inB, E.outRGBA16, E.inMax, E.G]),
       cpu: bgl(device, [E.inA, E.cpu]),
       mm: bgl(device, [E.inA, E.minmax]),
+      coarse: bgl(device, [E.inA, E.inB, E.outRGBA16]),
+      cmip: bgl(device, [E.inB, E.outRGBA16]),
     };
-    const [pBase, pFin, pMip, pAttr, pCpu, pMm] = await Promise.all([
+    const [pBase, pFin, pMip, pAttr, pCpu, pMm, pCoarse, pCmip] = await Promise.all([
       computePipe(device, mod, 'genBase', [fb, lay.base]),
       computePipe(device, mod, 'genFinal', [fb, lay.fin]),
       computePipe(device, mod, 'genMaxMip', [fb, lay.mip]),
       computePipe(device, mod, 'genAttr', [fb, lay.attr]),
       computePipe(device, mod, 'genCpuGrid', [fb, lay.cpu]),
       computePipe(device, mod, 'genMinMax', [fb, lay.mm]),
+      computePipe(device, mod, 'genCoarse', [fb, lay.coarse]),
+      computePipe(device, mod, 'genCoarseMip', [fb, lay.cmip]),
     ]);
     const v = (t: GPUTexture, mip = 0, count = 1) => t.createView({ baseMipLevel: mip, mipLevelCount: count });
     const mk = (layout: GPUBindGroupLayout, entries: [number, GPUBindingResource][]) =>
@@ -127,6 +132,24 @@ export class Terrain {
       device.queue.submit([enc.finish()]);
     }
     await runSliced(pAttr, bgAttr, 'Tracing sunlight', 0.45, 0.9);
+    {
+      const CN = N / 4, cm = Math.log2(CN) + 1;
+      this.fTex = tex2d(device, CN, CN, 'rgba16float', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'coarseField', cm);
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setBindGroup(0, this.ctx.frameBG);
+      pass.setPipeline(pCoarse);
+      pass.setBindGroup(1, mk(lay.coarse, [[0, v(this.hTex, 0)], [3, v(this.gTex)], [4, v(this.fTex, 0)]]));
+      pass.dispatchWorkgroups(CN / 8, CN / 8);
+      pass.setPipeline(pCmip);
+      for (let m = 1; m < cm; m++) {
+        pass.setBindGroup(1, mk(lay.cmip, [[3, v(this.fTex, m - 1)], [4, v(this.fTex, m)]]));
+        const s = Math.max(1, CN >> m);
+        pass.dispatchWorkgroups(Math.ceil(s / 8), Math.ceil(s / 8));
+      }
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
     {
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();

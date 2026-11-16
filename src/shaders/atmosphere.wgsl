@@ -6,10 +6,10 @@ const ATM_BOTTOM: f32 = PLANET_R * 0.001;
 const ATM_TOP: f32 = PLANET_R * 0.001 + 60.0;
 const RAY_SCAT: vec3f = vec3f(11.0, 31.0, 50.0) * 1e-3;
 const RAY_H: f32 = 7.0;
-const MIE_SCAT: vec3f = vec3f(26.0, 22.0, 19.0) * 1e-3;
+const MIE_SCAT: vec3f = vec3f(7.5, 6.5, 5.5) * 1e-3;
 const MIE_ABS: vec3f = vec3f(0.6, 0.8, 1.1) * 1e-3;
 const MIE_H: f32 = 1.4;
-const MIE_G: f32 = 0.78;
+const MIE_G: f32 = 0.84;
 const OZ_ABS: vec3f = vec3f(0.35, 1.1, 0.05) * 1e-3;
 const GROUND_ALBEDO: vec3f = vec3f(0.30, 0.22, 0.20);
 

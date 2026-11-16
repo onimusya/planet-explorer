@@ -100,7 +100,9 @@ fn hue(seed: f32, a: vec3f, b: vec3f, c: vec3f) -> vec3f {
   return mix(b, c, (t - 0.5) * 2.0);
 }
 
-fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: vec3f, valley: f32) -> Mat {
+const GILL_RIBS: f32 = 96.0;
+
+fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: vec3f, valley: f32, ribAA: f32) -> Mat {
   var m: Mat;
   m.alb = vec3f(0.3);
   m.rough = 0.7;
@@ -156,11 +158,11 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.emit = mix(vec3f(0.2, 0.9, 1.0), vec3f(0.9, 0.4, 1.0), fract(seed * 3.7)) * spot * 1.6 * glow;
     m.rough = 0.45;
     m.trans = 0.25;
-  } else if (part == 3.0) { // gills: bioluminescent underside
-    let rib = 0.5 + 0.5 * sin(uv.x * TAU * 48.0);
-    let c = mix(vec3f(0.10, 0.85, 1.0), vec3f(0.6, 0.35, 1.0), fract(seed * 5.1));
-    m.alb = vec3f(0.2, 0.25, 0.3);
-    m.emit = c * (0.35 + 0.65 * rib) * (0.4 + 0.6 * grad) * 1.4 * glow;
+  } else if (part == 3.0) { // gills: bioluminescent underside, ribs anti-aliased, brightest at the rim
+    let rib = 0.5 + 0.5 * cos(uv.x * TAU * GILL_RIBS) * ribAA;
+    let c = mix(vec3f(0.0, 0.42, 1.0), vec3f(0.30, 0.05, 1.0), fract(seed * 5.1));
+    m.alb = vec3f(0.16, 0.18, 0.24);
+    m.emit = c * (0.4 + 0.6 * rib) * (0.12 + 0.88 * grad * grad) * 0.48 * glow;
     m.rough = 0.8;
   } else if (part == 4.0) { // petals
     let tip = smoothstep(0.1, 1.0, grad);
@@ -172,13 +174,14 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.trans = 0.9;
     m.rough = 0.5;
     m.emit = b * smoothstep(0.85, 1.0, tip) * 0.25 * glow;
-  } else if (part == 5.0) { // crystal
-    let c = hue(seed, vec3f(0.15, 0.9, 1.0), vec3f(0.6, 0.35, 1.0), vec3f(1.0, 0.35, 0.7));
-    m.alb = c * 0.08;
-    m.rough = 0.12;
-    m.spec = 0.08;
-    let band = 0.6 + 0.4 * sin(lp.y * 3.0 + seed * 20.0 + time() * 0.6);
-    m.emit = c * (0.25 + 1.6 * grad * grad) * band * glow * 0.9;
+  } else if (part == 5.0) { // crystal: dark glossy gem body, luminous tips
+    let c = hue(seed, vec3f(0.012, 0.045, 1.0), vec3f(0.25, 0.024, 0.76), vec3f(0.02, 0.38, 0.62));
+    m.alb = c * 0.3;
+    m.rough = 0.05;
+    m.spec = 0.06;
+    m.trans = 0.5;
+    let tip = smoothstep(0.62, 1.0, grad);
+    m.emit = c * (tip * tip * 1.6 + 0.04) * mix(0.3, 1.0, valley) * glow;
   } else if (part == 6.0) { // glowing bulbs
     let c = hue(seed, vec3f(0.2, 1.0, 0.9), vec3f(1.0, 0.75, 0.25), vec3f(0.9, 0.3, 1.0));
     let pulse = 0.75 + 0.25 * sin(time() * (1.0 + fract(seed * 9.0)) + seed * 30.0);
@@ -186,11 +189,11 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.emit = c * 3.2 * pulse * glow;
     m.rough = 0.3;
     m.trans = 1.0;
-  } else { // rock
+  } else { // rock (luminance floor so small boulders never read as holes)
     var r = strata(wp.y, wp.xz) * 0.85;
     r *= 0.75 + 0.35 * fbm3(lp * 1.7, 3) + 0.15;
-    m.alb = r;
-    m.rough = 0.85;
+    m.alb = r * max(1.0, 0.33 / max(luma(r), 0.02));
+    m.rough = 0.8;
   }
   return m;
 }
@@ -199,6 +202,8 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   let part = in.info.x;
   let sp = in.info.y;
   let seed = in.info.z;
+  // derivative-based rib anti-aliasing (uniform control flow)
+  let ribAA = sat(1.5 - fwidth(in.uv.x) * GILL_RIBS * 1.5);
   if (cut) {
     var a = 1.0;
     if (part == 1.0) { a = leafAlpha(in.uv, seed + floor(in.ag.y * 10.0)); }
@@ -211,7 +216,7 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   var n = normalize(in.nrm);
   if (!front) { n = -n; }
   let valley = valleyMask(in.world.xz);
-  let m = material(part, sp, seed, in.uv, in.ag.y, in.world, in.lpos, valley);
+  let m = material(part, sp, seed, in.uv, in.ag.y, in.world, in.lpos, valley, ribAA);
   let sunC = sunLightAt(in.world.y);
   var sh = terrainShadow(in.world.xz, in.world.y + 0.5) * cloudShadow(in.world);
   if (sh > 0.001) { sh *= csmShadow(in.rel, n, dist, ign(in.pos.xy, F.misc.x)); }
@@ -226,11 +231,16 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   col += m.alb * sunC * sh * bt * 0.9;
   let ao = in.ag.x;
   col += m.alb * ambientSH(n) * ao;
-  // crystals: environment reflection approximation
+  let R = reflect(-V, n);
+  let nv = sat(dot(n, V));
   if (part == 5.0) {
-    let R = reflect(-V, n);
-    let fr = 0.04 + 0.96 * pow(1.0 - sat(dot(n, V)), 5.0);
-    col += skyColor(normalize(vec3f(R.x, abs(R.y), R.z))) * fr * 0.6;
+    // gems: full Fresnel sky reflection (lower hemisphere mirrored and darkened as ground)
+    let fr = m.spec + (1.0 - m.spec) * pow(1.0 - nv, 5.0);
+    let rs = skyColor(normalize(vec3f(R.x, abs(R.y), R.z))) * select(0.35, 1.0, R.y > 0.0);
+    col += rs * fr * mix(0.4, 1.0, sh);
+  } else {
+    // rough environment specular (keeps shaded surfaces from going flat)
+    col += ambientSH(R) * envBRDF(vec3f(m.spec), m.rough, nv) * ao;
   }
   col += m.emit;
   return vec4f(col, 1.0);

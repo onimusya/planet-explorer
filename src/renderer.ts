@@ -7,6 +7,7 @@ import { Metrics } from './metrics';
 import { Water } from './water';
 import { Vegetation } from './vegetation';
 import { Grass } from './grass';
+import { Volume } from './volume';
 import { Camera } from './camera';
 import { FO } from './frame';
 import { tex2d, T } from './gpu';
@@ -23,6 +24,10 @@ export class Renderer {
   water: Water;
   veg: Vegetation;
   grass: Grass;
+  vol: Volume;
+  private prevIW = 1;
+  private prevIH = 1;
+  private volDesc: GPUComputePassDescriptor = {};
   grassScale = 1;
   private shadowDescs: GPURenderPassDescriptor[] = [];
   private shadowBundles: GPURenderBundle[][] = [];
@@ -85,6 +90,7 @@ export class Renderer {
     this.water = new Water(ctx);
     this.veg = new Vegetation(ctx);
     this.grass = new Grass(ctx);
+    this.vol = new Volume(ctx);
     this.waterColorAtt = { view: undefined as unknown as GPUTextureView, loadOp: 'load', storeOp: 'store' };
     this.waterDepthAtt = { view: undefined as unknown as GPUTextureView, depthLoadOp: 'load', depthStoreOp: 'store' };
     this.waterDesc = { colorAttachments: [this.waterColorAtt], depthStencilAttachment: this.waterDepthAtt };
@@ -104,6 +110,7 @@ export class Renderer {
     await this.terrain.initRender('rgba16float');
     await this.post.init(this.ctx.worldBGL);
     await this.water.init();
+    await this.vol.init();
     progress(0.95, 'Growing flora');
     await this.veg.init();
     await this.grass.init();
@@ -128,6 +135,8 @@ export class Renderer {
       { binding: 5, resource: this.atmo.ap.createView() },
       { binding: 6, resource: { buffer: this.atmo.shBuf } },
       { binding: 7, resource: this.atmo.noise.createView() },
+      { binding: 8, resource: this.atmo.weather.createView() },
+      { binding: 9, resource: this.terrain.fTex.createView() },
     ] });
     this.lightBG = device.createBindGroup({ layout: this.ctx.lightBGL, entries: [
       { binding: 0, resource: this.shadowTex.createView({ dimension: '2d-array' }) },
@@ -170,11 +179,13 @@ export class Renderer {
     const s = Math.min(1, Math.sqrt(maxPix / (outW * outH)));
     const fw = Math.max(16, Math.round(outW * s)), fh = Math.max(16, Math.round(outH * s));
     if (this.t) {
-      for (const k of ['color', 'depth', 'lit', 'colorCopy', 'depthCopy', 'cloud', 'fog', 'bloomDown', 'bloomUp'] as const) this.t[k].destroy();
+      for (const k of ['color', 'depth', 'lit', 'colorCopy', 'depthCopy', 'fog', 'volDepth', 'bloomDown', 'bloomUp'] as const) this.t[k].destroy();
       this.t.hist[0].destroy(); this.t.hist[1].destroy();
+      this.t.cloud[0].destroy(); this.t.cloud[1].destroy();
     }
     this.t = this.post.createTargets(fw, fh, outW, outH);
-    this.post.bindTargets(this.t, this.worldBG, this.t.cloud.createView(), this.t.fog.createView());
+    this.post.bindTargets(this.t);
+    this.vol.bind(this.t);
     this.mainColorAtt.view = this.t.color.createView();
     this.mainDepthAtt.view = this.t.depth.createView();
     this.waterColorAtt.view = this.mainColorAtt.view;
@@ -192,19 +203,8 @@ export class Renderer {
       this.waterBundles = [be.finish()];
     }
     this.resetHistory = true;
-    // clear cloud/fog placeholders to transparent (T = 1)
-    this.clearHalfTargets();
   }
 
-  private clearHalfTargets() {
-    const { device } = this.ctx;
-    const w = this.t.cloud.width, h = this.t.cloud.height;
-    const data = new Uint16Array(w * h * 4);
-    const one = 0x3c00; // 1.0 in half
-    for (let i = 0; i < w * h; i++) data[i * 4 + 3] = one;
-    device.queue.writeTexture({ texture: this.t.cloud }, data, { bytesPerRow: w * 8 }, [w, h]);
-    device.queue.writeTexture({ texture: this.t.fog }, data, { bytesPerRow: w * 8 }, [w, h]);
-  }
 
   private writeStaticFrame() {
     const f = this.ctx.frameData;
@@ -303,6 +303,7 @@ export class Renderer {
     this.grass.update(this.terrain.planes, this.grassScale, 1);
     this.post.taaData[0] = this.resetHistory ? 1 : 0;
     device.queue.writeBuffer(this.post.taaU, 0, this.post.taaData);
+    this.vol.update(this.resetHistory || this.prevIW !== iw || this.prevIH !== ih, this.prevIW, this.prevIH);
     this.post.finalData[0] = 0.045; this.post.finalData[1] = this.overlayOn ? 1 : 0; this.post.finalData[3] = 0.35;
     device.queue.writeBuffer(this.post.finalU, 0, this.post.finalData);
 
@@ -340,20 +341,27 @@ export class Renderer {
     wp.setScissorRect(0, 0, iw, ih);
     wp.executeBundles(this.waterBundles);
     wp.end();
-    // 3. composite + TAA + bloom
-    this.postDesc.timestampWrites = ts ? m.tsw[4] : undefined;
+    // 3. volumetric clouds + fog (half resolution)
+    const ci = this.frame & 1;
+    this.volDesc.timestampWrites = ts ? m.tsw[4] : undefined;
+    cp = enc.beginComputePass(this.volDesc);
+    this.vol.encode(cp, this.worldBG, ci, iw, ih);
+    cp.end();
+    // 4. composite + TAA + bloom
+    this.postDesc.timestampWrites = ts ? m.tsw[5] : undefined;
     cp = enc.beginComputePass(this.postDesc);
-    this.post.encodeComposite(cp, this.worldBG, iw, ih);
+    this.post.encodeComposite(cp, this.worldBG, iw, ih, ci);
     this.post.encodeTaa(cp, this.hist, t);
     this.post.encodeBloom(cp, this.hist);
     cp.end();
-    // 4. final
-    this.post.encodeFinal(enc, swap, this.hist, ts ? m.tsw[5] : undefined);
+    // 5. final
+    this.post.encodeFinal(enc, swap, this.hist, ts ? m.tsw[6] : undefined);
     m.resolve(enc, this.frame);
     this.cmd[0] = enc.finish();
     device.queue.submit(this.cmd);
     m.poll();
     this.prevVP.set(this.vpNJ);
+    this.prevIW = iw; this.prevIH = ih;
     this.hist = 1 - this.hist;
     this.frame++;
     this.resetHistory = false;

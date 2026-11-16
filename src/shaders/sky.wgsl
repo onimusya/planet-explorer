@@ -2,11 +2,11 @@
 
 struct Body { col: vec3f, a: f32 };
 
-const GIANT_DIR: vec3f = vec3f(0.478, 0.292, -0.828);
+const GIANT_DIR: vec3f = vec3f(0.492, 0.174, -0.853);
 const GIANT_RAD: f32 = 0.165;    // angular radius (rad)
 const GIANT_AXIS: vec3f = vec3f(0.30, 0.94, 0.16);
-const MOON_DIR: vec3f = vec3f(-0.187, 0.438, -0.879);
-const MOON_RAD: f32 = 0.032;
+const MOON_DIR: vec3f = vec3f(0.9623, 0.2588, 0.0842);
+const MOON_RAD: f32 = 0.05;
 
 fn sphereHit(d: vec3f, c: vec3f, rad: f32) -> vec2f {
   // unit-distance sphere: centre c (unit), radius sin(rad)
@@ -35,7 +35,7 @@ fn gasGiant(d: vec3f, sun: vec3f) -> Body {
     let band = fbm(vec2f(rr * 40.0, 0.5), vec2i(4096), 4, 0.6) + 0.5;
     let gap = smoothstep(0.02, 0.06, abs(rr - 1.86)) * smoothstep(0.01, 0.03, abs(rr - 2.12));
     let fine = fbm(vec2f(rr * 160.0, 0.5), vec2i(16384), 3, 0.6) + 0.5;
-    ringA = sat(band * 1.2 - 0.2) * mix(0.6, 1.0, fine) * gap * smoothstep(1.28, 1.40, rr) * (1.0 - smoothstep(2.2, 2.35, rr)) * 0.55;
+    ringA = sat(band * 1.2 - 0.2) * mix(0.6, 1.0, fine) * gap * smoothstep(1.28, 1.40, rr) * (1.0 - smoothstep(2.2, 2.35, rr)) * 0.9;
     // planet shadow on the rings
     let rpW = c + rp;
     let toC = c - rpW;
@@ -55,8 +55,8 @@ fn gasGiant(d: vec3f, sun: vec3f) -> Body {
     let bl = lat * 9.0 + turb;
     let b1 = sin(bl * 3.1) * 0.5 + 0.5;
     let b2 = sin(bl * 7.3 + 1.7) * 0.5 + 0.5;
-    var col = mix(vec3f(0.80, 0.62, 0.48), vec3f(0.95, 0.88, 0.78), b1);
-    col = mix(col, vec3f(0.62, 0.50, 0.66), b2 * 0.45);
+    var col = mix(vec3f(0.807, 0.456, 0.254), vec3f(0.905, 0.791, 0.631), b1);
+    col = mix(col, vec3f(0.323, 0.212, 0.431), b2 * 0.5);
     col = mix(col, vec3f(0.78, 0.38, 0.30), smoothstep(0.55, 0.9, sin(bl * 1.3 + 0.4)) * 0.35);
     // great storm
     let sp = vec2f(lon - 0.9, (lat + 0.32) * 3.2);
@@ -119,12 +119,14 @@ fn skyFull(d: vec3f) -> vec3f {
   let gnd = raySphere(vec3f(0.0, r, 0.0), d, ATM_BOTTOM).x > 0.0;
   if (!gnd) {
     let T = sampleTrans(transLut, sLinClamp, r, d.y);
+    // planets read darker than the open sky behind the in-scattered light (artistic contrast)
     // space: faint stars toward zenith away from the sun
     var space = vec3f(0.0);
     let g = gasGiant(d, sun);
     let m = moonBody(d, sun);
     space = mix(space, m.col * F.sunColor.rgb * 0.14, m.a);
-    space = mix(space, g.col * F.sunColor.rgb * 0.16, g.a);
+    space = mix(space, g.col * F.sunColor.rgb * 0.3, g.a);
+    c *= 1.0 - 0.45 * max(g.a, m.a * 0.6);
     // sun disk with limb darkening and soft corona
     let cs = dot(d, sun);
     let sunR = 0.0125;

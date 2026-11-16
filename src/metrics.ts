@@ -2,7 +2,7 @@
 // All per-frame paths write into preallocated typed arrays.
 
 export const RING = 2048;
-export const PASS_NAMES = ['PRE', 'SHD', 'MAIN', 'WATR', 'POST', 'FIN'] as const;
+export const PASS_NAMES = ['PRE', 'SHD', 'MAIN', 'WATR', 'VOL', 'POST', 'FIN'] as const;
 export const NPASS = PASS_NAMES.length;
 
 export class Metrics {

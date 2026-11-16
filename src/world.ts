@@ -34,6 +34,10 @@ const rAxis: [number, number] = [Math.cos(VISTA_AZ * D2R), Math.sin(VISTA_AZ * D
 export const RANGE_A: [number, number] = [RANGE_C[0] - rAxis[0] * 3800, RANGE_C[1] - rAxis[1] * 3800];
 export const RANGE_B: [number, number] = [RANGE_C[0] + rAxis[0] * 3800, RANGE_C[1] + rAxis[1] * 3800];
 export const VALLEY_CENTER = VALLEY_C;
+// Cloud-layer point that shadows the vista (kept clear so the first frame is sunlit).
+const tSun = (0.5 * (CLOUD_BOT + CLOUD_TOP) - 420) / SUN_DIR[1];
+export const VISTA_SUNCLEAR: [number, number] = [VISTA_P[0] + SUN_DIR[0] * tSun, VISTA_P[1] + SUN_DIR[2] * tSun];
+export const FOG_MAX = 14000; // ground-fog march distance (m)
 
 const f = (x: number) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 const v2 = (a: readonly number[]) => `vec2f(${f(a[0])}, ${f(a[1])})`;
@@ -56,6 +60,8 @@ export function wgslPrelude(): string {
     `const VALLEY_B: vec2f = ${v2(VALLEY_B)};`,
     `const RANGE_A: vec2f = ${v2(RANGE_A)};`,
     `const RANGE_B: vec2f = ${v2(RANGE_B)};`,
+    `const VISTA_SUNCLEAR: vec2f = ${v2(VISTA_SUNCLEAR)};`,
+    `const FOG_MAX: f32 = ${f(FOG_MAX)};`,
     '',
   ].join('\n');
 }

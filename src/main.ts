@@ -5,6 +5,7 @@ import { Renderer } from './renderer';
 import { Camera } from './camera';
 import { Input } from './input';
 import { clamp } from './math';
+import { PASS_NAMES } from './metrics';
 import {
   PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L,
 } from './world';
@@ -41,14 +42,20 @@ async function main() {
     const l = Math.hypot(dx, dy, dz);
     POSES.set([x, y, z, dx / l, dy / l, dz / l], i * 6);
   };
+  const D2R = Math.PI / 180;
+  const dirAz = (az: number, pitch: number): [number, number, number] => [
+    Math.sin(az * D2R) * Math.cos(pitch * D2R), Math.sin(pitch * D2R), -Math.cos(az * D2R) * Math.cos(pitch * D2R)];
   {
-    const x = VISTA_P[0] - VISTA_DIR[0] * 150, z = VISTA_P[1] - VISTA_DIR[1] * 150;
-    setPose(0, x, ground(x, z) + 24, z, VISTA_DIR[0], -0.16, VISTA_DIR[1]);
+    // A. Arrival Vista: on the cliff lip; sun just off the left edge, gas giant right of centre over the lake
+    const x = VISTA_P[0] + VISTA_DIR[0] * 30, z = VISTA_P[1] + VISTA_DIR[1] * 30;
+    setPose(0, x, ground(x, z) + 12, z, ...dirAz(18, -10));
+    // B. Bioluminescent Valley: above the floor near the head of the valley, looking down its axis
     const ax = VALLEY_B[0] - VALLEY_A[0], az = VALLEY_B[1] - VALLEY_A[1];
-    const vx = VALLEY_A[0] + ax * 0.3, vz = VALLEY_A[1] + az * 0.3;
-    setPose(1, vx, ground(vx, vz) + 14, vz, ax, 0.08 * Math.hypot(ax, az), az);
-    const hx = HIGHLANDS_C[0] + 900, hz = HIGHLANDS_C[1] + 1400;
-    setPose(2, hx, ground(hx, hz) + 140, hz, HIGHLANDS_C[0] - hx, -0.12 * 1600, HIGHLANDS_C[1] - hz);
+    const vx = VALLEY_A[0] + ax * 0.15, vz = VALLEY_A[1] + az * 0.15;
+    setPose(1, vx, ground(vx, vz) + 35, vz, ...dirAz(60, -6));
+    // C. Monumental Highlands: above a mesa prow on the west rim, looking east-north-east along the canyon
+    const hx = HIGHLANDS_C[0] - 1200, hz = HIGHLANDS_C[1] + 250;
+    setPose(2, hx, Math.max(600, ground(hx, hz) + 40), hz, ...dirAz(75, -12));
     void LAKE_C;
   }
   const goPose = (i: number, fly: boolean) => {
@@ -147,7 +154,8 @@ async function main() {
       c = m.put(3, c, '  ');
       for (let p = 0; p < m.passMs.length; p++) {
         if (m.passMs[p] <= 0) continue;
-        c = m.put(3, c, p === 0 ? 'PRE ' : p === 1 ? 'SHD ' : p === 2 ? 'MAIN ' : p === 3 ? 'WATR ' : p === 4 ? 'POST ' : 'FIN ');
+        c = m.put(3, c, PASS_NAMES[p]);
+        c = m.put(3, c, ' ');
         c = m.num(3, c, m.passMs[p], 1);
         c = m.put(3, c, ' ');
       }
@@ -246,6 +254,8 @@ async function main() {
     cam: () => [camera.pos[0], camera.pos[1], camera.pos[2], camera.fwd[0], camera.fwd[1], camera.fwd[2]],
     vegCounts: () => r.veg.debugCounts(),
     vegStats: () => r.veg.stats,
+    volDebug: (m: number) => { r.vol.debug = m; },
+    passMs: () => Array.from(r.metrics.passMs),
     info: () => ({ adapter: gpu.adapterName, timestamps: gpu.timestamps, internal: [r.iw, r.ih], out: [r.t.outW, r.t.outH], worldL: WORLD_L }),
   };
   (window as unknown as Record<string, unknown>).__pe = api;

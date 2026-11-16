@@ -13,7 +13,7 @@ const C = GPUShaderStage.COMPUTE;
 export interface Targets {
   fullW: number; fullH: number; outW: number; outH: number;
   color: GPUTexture; depth: GPUTexture; lit: GPUTexture; colorCopy: GPUTexture; depthCopy: GPUTexture;
-  cloud: GPUTexture; fog: GPUTexture;
+  cloud: GPUTexture[]; fog: GPUTexture; volDepth: GPUTexture;
   hist: GPUTexture[]; bloomDown: GPUTexture; bloomUp: GPUTexture;
 }
 
@@ -27,7 +27,7 @@ export class Post {
   private lTaa!: GPUBindGroupLayout;
   private lBloom!: GPUBindGroupLayout;
   private lFinal!: GPUBindGroupLayout;
-  private bgComp!: GPUBindGroup;
+  private bgComp: GPUBindGroup[] = [];
   private bgTaa: GPUBindGroup[] = [];
   private bgDown: GPUBindGroup[] = [];
   private bgUp: GPUBindGroup[] = [];
@@ -52,7 +52,7 @@ export class Post {
   async init(worldBGL: GPUBindGroupLayout) {
     const { device } = this.ctx;
     const fb = this.ctx.frameBGL;
-    this.lComp = bgl(device, [L.tex(0, 'unfilterable-float', '2d', C), L.depth(1, '2d', C), L.tex(2, 'float', '2d', C), L.tex(3, 'float', '2d', C), L.stTex(4, 'rgba16float')]);
+    this.lComp = bgl(device, [L.tex(0, 'unfilterable-float', '2d', C), L.depth(1, '2d', C), L.tex(2, 'float', '2d', C), L.tex(3, 'float', '2d', C), L.stTex(4, 'rgba16float'), L.tex(5, 'unfilterable-float', '2d', C)]);
     this.lTaa = bgl(device, [L.tex(0, 'unfilterable-float', '2d', C), L.depth(1, '2d', C), L.tex(2, 'float', '2d', C), L.stTex(3, 'rgba16float'), L.uniform(4, C)]);
     this.lBloom = bgl(device, [L.tex(0, 'float', '2d', C), L.stTex(1, 'rgba16float'), L.tex(2, 'float', '2d', C), L.uniform(3, C)]);
     const F = GPUShaderStage.FRAGMENT;
@@ -97,8 +97,9 @@ export class Post {
       lit: tex2d(device, fullW, fullH, 'rgba16float', S | B | R, 'lit'),
       colorCopy: tex2d(device, fullW, fullH, 'rgba16float', B | T.COPY_DST, 'colorCopy'),
       depthCopy: tex2d(device, fullW, fullH, 'depth32float', B | T.COPY_DST, 'depthCopy'),
-      cloud: tex2d(device, hw, hh, 'rgba16float', S | B | T.COPY_DST, 'cloud'),
-      fog: tex2d(device, hw, hh, 'rgba16float', S | B | T.COPY_DST, 'fog'),
+      cloud: [tex2d(device, hw, hh, 'rgba16float', S | B, 'cloud0'), tex2d(device, hw, hh, 'rgba16float', S | B, 'cloud1')],
+      fog: tex2d(device, hw, hh, 'rgba16float', S | B, 'fog'),
+      volDepth: tex2d(device, hw, hh, 'r32float', S | B, 'volDepth'),
       hist: [tex2d(device, outW, outH, 'rgba16float', S | B, 'hist0'), tex2d(device, outW, outH, 'rgba16float', S | B, 'hist1')],
       bloomDown: tex2d(device, bw, bh, 'rgba16float', S | B, 'bloomDown', BLOOM_LEVELS),
       bloomUp: tex2d(device, bw, bh, 'rgba16float', S | B, 'bloomUp', BLOOM_LEVELS),
@@ -110,16 +111,16 @@ export class Post {
     return t;
   }
 
-  bindTargets(t: Targets, worldBG: GPUBindGroup, cloudView: GPUTextureView, fogView: GPUTextureView) {
+  bindTargets(t: Targets) {
     const { device } = this.ctx;
-    void worldBG;
-    this.bgComp = device.createBindGroup({ layout: this.lComp, entries: [
+    this.bgComp = [0, 1].map((i) => device.createBindGroup({ layout: this.lComp, entries: [
       { binding: 0, resource: t.color.createView() },
       { binding: 1, resource: t.depth.createView() },
-      { binding: 2, resource: cloudView },
-      { binding: 3, resource: fogView },
+      { binding: 2, resource: t.cloud[i].createView() },
+      { binding: 3, resource: t.fog.createView() },
       { binding: 4, resource: t.lit.createView() },
-    ] });
+      { binding: 5, resource: t.volDepth.createView() },
+    ] }));
     this.bgTaa = [0, 1].map((i) => device.createBindGroup({ layout: this.lTaa, entries: [
       { binding: 0, resource: t.lit.createView() },
       { binding: 1, resource: t.depth.createView() },
@@ -165,11 +166,11 @@ export class Post {
     ] }));
   }
 
-  encodeComposite(pass: GPUComputePassEncoder, worldBG: GPUBindGroup, w: number, h: number) {
+  encodeComposite(pass: GPUComputePassEncoder, worldBG: GPUBindGroup, w: number, h: number, ci: number) {
     pass.setPipeline(this.pComp);
     pass.setBindGroup(0, this.ctx.frameBG);
     pass.setBindGroup(1, worldBG);
-    pass.setBindGroup(2, this.bgComp);
+    pass.setBindGroup(2, this.bgComp[ci]);
     pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
   }
 
