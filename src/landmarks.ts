@@ -1,5 +1,4 @@
-// Explicit placements: landmarks (arches, floating islands, rock pillars) and hero flora that frame
-// the destinations. Built once on the CPU after terrain generation from the CPU height grid; the GPU
+// Explicit placements: landmarks (arches, floating islands, rock pillars) that frame the destinations. Built once on the CPU after terrain generation from the CPU height grid; the GPU
 // cull re-grounds each instance on the exact heightmap (y offset is relative to the ground).
 import { rng } from './math';
 import { SEED, VISTA_P, VISTA_DIR, HIGHLANDS_C, VALLEY_A, VALLEY_B, WATER_Y, WORLD_L } from './world';
@@ -53,7 +52,7 @@ export function buildMarks(h: H): Float32Array {
   // ---- A. Arrival Vista: islands hanging over the mesas, an arch past the lake, framing trees ----
   {
     const cx = VISTA_P[0] + VISTA_DIR[0] * 30, cz = VISTA_P[1] + VISTA_DIR[1] * 30;
-    const cy = h(cx, cz) + 12;
+    const cy = h(cx, cz) + 4.5;
     const isl = (az: number, d: number, el: number, sc: number, v: number, seed: number) => {
       const [x, z] = at(cx, cz, az, d);
       island(x, z, cy + Math.tan(el * D2R) * d, sc, v, seed, az * D2R * 1.7 + seed);
@@ -67,14 +66,6 @@ export function buildMarks(h: H): Float32Array {
       const [x, z] = at(cx, cz, 37, 1350);
       arch(x, z, yawTo(cx - x, cz - z) + 0.35, 2.3, 0, 11, 1);
     }
-    // framing flora on the cliff lip
-    const tree = (az: number, d: number, sc: number, v: number, seed: number) => {
-      const [x, z] = at(cx, cz, az, d);
-      push(x, z, -0.5, sc, seed * 2.1, seed, SP.TREE, v, 6);
-    };
-    // the camera stands on a cliff lip: these grow on the slope just below it, crowns at eye level
-    tree(-40, 13, 2.6, 1, 21);
-    tree(66, 15, 3.0, 2, 22);
   }
 
   // ---- B. Bioluminescent Valley: a rock bridge across the floor, islands trailing vines overhead ----
@@ -111,7 +102,9 @@ export function buildMarks(h: H): Float32Array {
     if (slope(x, z, 24) > 0.1) continue;
     const v = r() < 0.25 ? 2 : r() < 0.5 ? 1 : 0, sc = 0.9 + r() * 0.8;
     if (!free(x, z, ARCH_W[v] * sc * 0.5 + 300)) continue;
-    if (arch(x, z, r() * 6.283, sc, v, 500 + k, 0.3)) m++;
+    // near the vista, turn the opening toward the camera so it never reads edge-on
+    const yaw = dist2(x, z, VISTA_P[0], VISTA_P[1]) < 3500 ? yawTo(VISTA_P[0] - x, VISTA_P[1] - z) + (r() - 0.5) * 0.9 : r() * 6.283;
+    if (arch(x, z, yaw, sc, v, 500 + k, 0.3)) m++;
   }
   // floating islands drifting over the highlands and along the way to the vista
   // (kept out of the composed vista frame, where only the hero islands above hang)

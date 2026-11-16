@@ -44,7 +44,7 @@ fn vs(@builtin(vertex_index) vid: u32, @location(0) node: vec4f) -> VOut {
   }
   let fade = 1.0 - smoothstep(160.0, 420.0, dist);
   if (fade > 0.0) {
-    let rock = attrAt(xz).w;
+    let rock = attrAt(xz).w * (1.0 - ledgeGrass(xz));
     h += terrainDetail(xz, rock).x * fade;
   }
   var o: VOut;
@@ -69,9 +69,10 @@ fn terrainSurface(wp: vec3f, dist: f32, fw: f32) -> Surface {
   let attr = attrAt(p);
   let g = gradAt(p);
   var dg = vec2f(0.0);
+  let lg = ledgeGrass(p);
   let dfade = 1.0 - smoothstep(160.0, 420.0, dist);
   if (dfade > 0.0) {
-    dg = terrainDetail(p, attr.w).yz * dfade;
+    dg = terrainDetail(p, attr.w * (1.0 - lg)).yz * dfade;
   }
   // micro bump (fades with pixel footprint)
   let mfade = 1.0 - smoothstep(0.05, 0.6, fw);
@@ -89,7 +90,7 @@ fn terrainSurface(wp: vec3f, dist: f32, fw: f32) -> Surface {
 
   var rockW = smoothstep(0.26, 0.46, slope + (nv - 0.5) * 0.22 + (attr.w - 0.4) * 0.25);
   rockW = max(rockW, smoothstep(0.62, 0.9, attr.w));
-  rockW = max(rockW, highland * smoothstep(0.12, 0.3, slope + (nv - 0.5) * 0.3));
+  rockW = max(rockW, highland * smoothstep(0.12, 0.3, slope + (nv - 0.5) * 0.3)) * (1.0 - lg);
   let snowLine = 1180.0 + nb * 320.0;
   let snowW = smoothstep(snowLine, snowLine + 140.0, y) * (1.0 - smoothstep(0.32, 0.6, slope));
   let shoreW = (1.0 - smoothstep(0.8, 4.0 + nv * 3.0, y)) * (1.0 - rockW);

@@ -46,7 +46,7 @@ export class Terrain {
     const mips = Math.log2(N) + 1;
     const base = tex2d(device, N, N, 'r32float', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'baseH');
     const attrTmp = tex2d(device, N, N, 'rgba8unorm', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'attrTmp');
-    this.hTex = tex2d(device, N, N, 'r32float', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'height', mips);
+    this.hTex = tex2d(device, N, N, 'r32float', T.STORAGE_BINDING | T.TEXTURE_BINDING | T.COPY_SRC, 'height', mips);
     this.gTex = tex2d(device, N, N, 'rgba16float', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'gradShadow');
     this.aTex = tex2d(device, N, N, 'rgba8unorm', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'attr');
     const gBuf = buffer(device, 16, U.UNIFORM | U.COPY_DST, 'genU');
@@ -202,6 +202,22 @@ export class Terrain {
       cur = nx;
       n = m;
     }
+  }
+
+  // Debug only (called from the automation API, never per frame): read back a 64x64-texel block of
+  // the full-resolution heightmap whose first texel contains (x, z).
+  async probe(x: number, z: number): Promise<Float32Array> {
+    const { device } = this.ctx;
+    const tx = WORLD_L / HMAP_N;
+    const ox = Math.floor(x / tx), oz = Math.floor(z / tx);
+    const rb = buffer(device, 64 * 64 * 4, U.MAP_READ | U.COPY_DST, 'probe');
+    const enc = device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: this.hTex, origin: { x: ox, y: oz } }, { buffer: rb, bytesPerRow: 256 }, { width: 64, height: 64 });
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(rb.getMappedRange().slice(0));
+    rb.unmap(); rb.destroy();
+    return out;
   }
 
   // CPU height query (bilinear on the 16 m grid).

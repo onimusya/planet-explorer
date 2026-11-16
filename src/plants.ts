@@ -598,33 +598,34 @@ function appendMesh(dst: MeshBuilder, src: MeshBuilder, off: V3, yaw: number, sc
 // -------------------------------------------------------------------------------------------
 // Landmarks (placed explicitly, see landmarks.ts). Mesh units are metres at instance scale 1.
 
-// Floating island: lobed meadow plateau over a tapering, ridged rock keel; hanging vines and a few
-// trees on top. Origin = centre of the rim; the keel hangs to about -D.
+// Floating island: lobed meadow plateau (sheared so it tips a few degrees, one or two rock knolls)
+// over a rim cliff of varying height. The underside is an inverted mountain: a field of hanging
+// polytope crags whose depth falls off toward the rim, the deepest off-centre, plus loose floating
+// rocks. Vines hang from the rim, trees and shrubs grow on top. Origin = centre of the rim.
 const ISLE_R = 60;
 export const ISLE_TOP = (s: number) => ISLE_R * (0.1 * (1 - s * s) - 0.07 * Math.pow(s, 6));
 export function genIsland(seed: number, variant: number, lod: number): MeshBuilder {
   const r = rng(seed * 911 + variant * 53 + 3);
   const mb = new MeshBuilder();
   const R = ISLE_R;
-  const D = R * (variant === 1 ? 1.25 : variant === 2 ? 0.6 : 0.85);
+  const D = R * (variant === 1 ? 1.3 : variant === 2 ? 0.75 : 1.0);
   const elong = variant === 2 ? 1.45 : 1.0 + r() * 0.2;
   const sd = lod === 0 ? 5 : lod === 1 ? 4 : 3;
   const { v, f } = icosphere(sd);
-  const tip: V3 = [(r() - 0.5) * R * 0.5, 0, (r() - 0.5) * R * 0.5];
   const ph1 = r() * 50, ph2 = r() * 50;
+  const ta = r() * 6.283, tilt = 0.06 + r() * 0.05;
   const rimAt = (th: number) => {
     const cx = Math.cos(th), sz = Math.sin(th);
     return R * (1 + 0.24 * fbm3(cx * 1.2 + ph1, 0.5, sz * 1.2, seed, 3) + 0.07 * fbm3(cx * 4 + ph2, 1.7, sz * 4, seed + 1, 2));
   };
-  // rim cliff band over a shallow faceted bowl; the keel itself is a cluster of hanging polytope
-  // crags (an inverted crag field) plus a few loose floating rocks
-  const cliff = R * (variant === 2 ? 0.13 : 0.2);
-  const bowl = D * 0.4;
+  const cliffAt = (th: number) =>
+    R * (variant === 2 ? 0.1 : 0.15) * (0.5 + 1.2 * (fbm3(Math.cos(th) * 1.4 + ph2, 2.2, Math.sin(th) * 1.4, seed + 3, 2) + 0.5));
+  const bowl = D * 0.45;
   const tc = 0.24, q0 = 0.95;
   const pos: V3[] = v.map((d) => {
     const th = Math.atan2(d[2], d[0]);
     const cx = Math.cos(th), sz = Math.sin(th);
-    const rim = rimAt(th);
+    const rim = rimAt(th), cliff = cliffAt(th);
     const ex = cx * rim * elong, ez = sz * rim;
     if (d[1] >= 0) {
       const s = Math.sqrt(Math.max(0, 1 - d[1] * d[1])); // 0 centre .. 1 rim
@@ -646,22 +647,35 @@ export function genIsland(seed: number, variant: number, lod: number): MeshBuild
   });
   const pieces: Piece[] = [{ pos, f }];
   const rc = rng(seed * 59 + variant * 11 + 5);
-  const nc = variant === 1 ? 5 : 8;
   const csd = lod === 0 ? 3 : lod === 1 ? 2 : 1;
+  // hanging crags on a golden-angle spiral: long near the (off-centre) deepest point, short at the rim
+  const nc = variant === 1 ? 10 : 13;
+  const tipA = rc() * 6.283, tipR = 0.1 + rc() * 0.2;
   for (let i = 0; i < nc; i++) {
-    const big = i === 0;
-    const a = rc() * 6.283, dr = big ? rc() * 0.12 : 0.18 + rc() * 0.5;
-    const px = Math.cos(a) * dr * R * elong + tip[0] * 0.3, pz = Math.sin(a) * dr * R + tip[2] * 0.3;
-    const w = R * (big ? (variant === 1 ? 0.36 : 0.44) : 0.13 + rc() * 0.15);
-    const hh = D * (big ? (variant === 1 ? 1.6 : 1.05) : 0.32 + rc() * 0.5) * (1 - dr * 0.5);
-    const top = -R * 0.07 - cliff - bowl * Math.pow(1 - dr * dr, 1.1) * 0.55;
+    const first = i === 0;
+    const a = first ? tipA : tipA + i * 2.39996 + (rc() - 0.5) * 0.7;
+    const dr = first ? tipR : Math.min(0.85, 0.16 + 0.66 * Math.sqrt(i / nc) + (rc() - 0.5) * 0.12);
+    const w = R * (first ? 0.4 : (0.19 + rc() * 0.14) * (1 - 0.35 * dr));
+    const hh = D * (first ? 0.95 : Math.max(0.16, Math.pow(1 - dr, 1.1) * (0.6 + rc() * 0.6)));
     const pl = [...facetRing(rc, 6 + Math.floor(rc() * 3), 0.08, 0.82, 0.3), ...facetRing(rc, 4 + Math.floor(rc() * 2), -1.5, 0.66, 0.35)];
     pl.push([[0, 1, 0], 0.95]);
-    const yaw = rc() * 6.283, lean = (rc() - 0.5) * 0.25;
-    if (lod === 2 && !big && w < R * 0.2) continue;
+    const yaw = rc() * 6.283, lean = (rc() - 0.5) * 0.3, wz = 0.8 + rc() * 0.4;
+    if (lod === 2 && !first && hh < D * 0.3) continue;
+    const ra = rimAt(a);
+    const px = Math.cos(a) * dr * ra * elong, pz = Math.sin(a) * dr * ra;
+    const top = -R * 0.07 - cliffAt(a) - bowl * Math.pow(Math.max(0, 1 - dr * dr), 1.1) * 0.5;
     const bx: V3 = [Math.cos(yaw), 0, Math.sin(yaw)], bz: V3 = [-Math.sin(yaw), 0, Math.cos(yaw)];
     const by: V3 = norm([lean * bx[0], 1, lean * bx[2]]);
-    pieces.push(polyPiece([px, top - hh * 0.42, pz], [w, hh * 0.52, w * (0.8 + rc() * 0.4)], csd, seed + 70 + i, pl, [bx, by, bz], 0.07));
+    pieces.push(polyPiece([px, top - hh * 0.42, pz], [w, hh * 0.52, w * wz], csd, seed + 70 + i, pl, [bx, by, bz], 0.07));
+  }
+  // rock knolls breaking the plateau skyline
+  for (let i = 0; i < (variant === 2 ? 1 : 2); i++) {
+    const a = rc() * 6.283, s = 0.5 + rc() * 0.3;
+    const w = R * (0.1 + rc() * 0.08), hk = R * (0.1 + rc() * 0.12), wz = 0.8 + rc() * 0.4;
+    const pl = [...facetRing(rc, 7, 0.15, 0.85, 0.3), ...facetRing(rc, 4, 1.3, 0.72, 0.35)];
+    pl.push([[0, -1, 0], 0.8]);
+    const ra = rimAt(a);
+    pieces.push(polyPiece([Math.cos(a) * ra * elong * s, ISLE_TOP(s) + hk * 0.25, Math.sin(a) * ra * s], [w, hk, w * wz], csd, seed + 130 + i, pl, undefined, 0.08));
   }
   if (lod < 2) {
     // loose rocks drifting just under and beside the rim
@@ -669,14 +683,15 @@ export function genIsland(seed: number, variant: number, lod: number): MeshBuild
       const a = rc() * 6.283, dr = 1.05 + rc() * 0.35;
       const w = R * (0.04 + rc() * 0.06);
       const pl = facetRing(rc, 7, 0.0, 0.8, 0.3).concat(facetRing(rc, 4, -1.2, 0.7, 0.3), facetRing(rc, 3, 1.2, 0.75, 0.3));
-      pieces.push(polyPiece([Math.cos(a) * dr * R * elong, -R * 0.07 - cliff * (0.5 + rc() * 2.5), Math.sin(a) * dr * R], [w, w * (0.9 + rc() * 0.8), w], csd, seed + 90 + i, pl, undefined, 0.08));
+      pieces.push(polyPiece([Math.cos(a) * dr * R * elong, -R * 0.07 - cliffAt(a) * (0.5 + rc() * 2.5), Math.sin(a) * dr * R], [w, w * (0.9 + rc() * 0.8), w], csd, seed + 90 + i, pl, undefined, 0.08));
     }
   }
   const all = mergePieces(pieces);
   rockSurface(mb, all.pos, all.f, R * 0.5, 24, (i) => {
     const y = all.pos[i][1];
-    return y > -R * 0.08 ? 1 : 0.38 + 0.47 * Math.max(0, 1 + (y + cliff) / (D * 1.8));
-  });  // hanging vines from the rim (own random streams so props stay put across LODs)
+    return y > -R * 0.08 ? 1 : 0.38 + 0.47 * Math.max(0, 1 + (y + R * 0.15) / (D * 1.8));
+  });
+  // hanging vines from the rim (own random streams so props stay put across LODs)
   const rv = rng(seed * 37 + variant * 5 + 11);
   const nv = lod === 0 ? 46 : lod === 1 ? 18 : 0;
   for (let i = 0; i < nv; i++) {
@@ -707,6 +722,9 @@ export function genIsland(seed: number, variant: number, lod: number): MeshBuild
       appendMesh(mb, genShrub(seed + i, i % 2, 1), [Math.cos(th) * rim * elong * s, ISLE_TOP(s) - 0.2, Math.sin(th) * rim * s], rs() * 6.283, 1.6 + rs());
     }
   }
+  // tip the whole island a few degrees (a shear keeps the props upright)
+  const tx = Math.cos(ta) * tilt, tz = Math.sin(ta) * tilt;
+  for (let i = 0; i < mb.count; i++) mb.p[i * 3 + 1] += tx * mb.p[i * 3] + tz * mb.p[i * 3 + 2];
   return mb;
 }
 
@@ -788,10 +806,21 @@ export function genPillar(seed: number, variant: number, lod: number): MeshBuild
     }
     rockMesh(mb, [0.6, y + 2.2, -0.4], [9.5, 3.6, 8.2], sd, seed + 30, 11, 0.7);
   } else if (variant === 1) {
+    // spire cluster: each spire a stack of jointed blocks, tapering, with a blunt broken top
     rockMesh(mb, [0, 0, 0], [12, 6, 11], sd, seed + 2, 10, 0.5);
-    rockMesh(mb, [0, 24, 0], [5.5, 28, 5], sd + (lod < 2 ? 1 : 0), seed + 3, 12, 0.95);
-    rockMesh(mb, [6.5, 15, 3], [4.2, 18, 4], sd, seed + 4, 11, 0.95);
-    rockMesh(mb, [-5, 11, -4.5], [3.6, 13, 3.4], sd, seed + 5, 10, 0.95);
+    const spire = (x: number, z: number, rad: number, H: number, s0: number) => {
+      let y = 0;
+      for (let k = 0; y < H && k < 9; k++) {
+        const rr = rad * (1 - 0.5 * (y / H)) * (0.88 + r() * 0.24);
+        const h = rr * (1.4 + r() * 0.9);
+        const ox = (r() - 0.5) * rr * 0.3, oz = (r() - 0.5) * rr * 0.3;
+        rockMesh(mb, [x + ox, y + h * 0.5, z + oz], [rr, h * 0.6, rr * (0.8 + r() * 0.35)], sd, s0 + k, 9, 0.8);
+        y += h * 0.86;
+      }
+    };
+    spire(0, 0, 5.8, 48, seed + 3);
+    spire(6.8, 3.2, 4.4, 30, seed + 20);
+    spire(-5.2, -4.6, 3.8, 20, seed + 40);
   } else {
     rockMesh(mb, [0, 0, 0], [9, 5, 8], sd, seed + 6, 10, 0.5);
     rockMesh(mb, [0, 9, 0], [3.4, 10, 3.0], sd, seed + 7, 9, 0.95);

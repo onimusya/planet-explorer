@@ -70,7 +70,7 @@ fn gasGiant(d: vec3f, sun: vec3f) -> Body {
     var rs = 1.0;
     if (tp > 0.0 && rq > 1.28 && rq < 2.35) { rs = 1.0 - 0.6 * smoothstep(1.3, 1.45, rq) * (1.0 - smoothstep(2.2, 2.35, rq)); }
     let rim = pow(1.0 - sat(dot(n, -d)), 3.0);
-    col = col * lit * rs + vec3f(0.55, 0.70, 0.90) * rim * sat(ndl + 0.3) * 0.6;
+    col = col * lit * rs + vec3f(0.55, 0.70, 0.90) * rim * sat(ndl + 0.3) * 0.25;
     // night side faint glow (ring-shine)
     col += vec3f(0.02, 0.025, 0.04) * (1.0 - lit);
     o.col = col;
@@ -125,8 +125,8 @@ fn skyFull(d: vec3f) -> vec3f {
     let g = gasGiant(d, sun);
     let m = moonBody(d, sun);
     space = mix(space, m.col * F.sunColor.rgb * 0.14, m.a);
-    space = mix(space, g.col * F.sunColor.rgb * 0.3, g.a);
-    c *= 1.0 - 0.45 * max(g.a, m.a * 0.6);
+    space = mix(space, g.col * F.sunColor.rgb * 0.42, g.a);
+    c *= 1.0 - max(0.72 * g.a, 0.3 * m.a);
     // sun disk with limb darkening and soft corona
     let cs = dot(d, sun);
     let sunR = 0.0125;

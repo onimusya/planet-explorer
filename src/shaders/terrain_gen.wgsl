@@ -50,6 +50,23 @@ fn segInfo(p: vec2f, a: vec2f, b: vec2f) -> vec3f {
 }
 
 // Designed macro landscape. Returns height in metres.
+// Arrival vista ledge: a level shelf cut into the cliff face where the camera stands. Its lip runs
+// ~15 m ahead (wavier toward the sides) so the first frame has a near foreground above the drop to
+// the plain. x = shelf mask, y = shelf height.
+fn vistaLedge(p: vec2f) -> vec2f {
+  let uv = p / WORLD_L;
+  let lc = wrapD2(p - VISTA_CAM);
+  let la = dot(lc, VISTA_DIR);
+  let ls = dot(lc, vec2f(-VISTA_DIR.y, VISTA_DIR.x));
+  let lipA = 19.0 + fbm(uv * 512.0, vec2i(512), 2, 0.5) * (2.5 + abs(ls) * 0.25) - ls * ls * 0.003;
+  // (the drop is spread over ~3 heightmap texels: a rounded shoulder, so bicubic sampling cannot
+  //  overshoot into a hump at the lip)
+  let lm = (1.0 - smoothstep(lipA - 9.0, lipA + 3.0, la)) * (1.0 - smoothstep(55.0, 75.0, abs(ls))) * smoothstep(-75.0, -50.0, la);
+  let sh = smoothstep(lipA - 11.0, lipA + 1.0, la);
+  let lh = VISTA_LEDGE + fbm(uv * 2048.0, vec2i(2048), 2, 0.5) * 1.2 - sh * sh * 6.0;
+  return vec2f(lm, lh);
+}
+
 fn baseHeight(p: vec2f) -> f32 {
   let uv = p / WORLD_L;
   let wq = uv * 4.0;
@@ -114,13 +131,20 @@ fn baseHeight(p: vec2f) -> f32 {
   // ledges on canyon walls
   hh = mix(hh, terrace(hh, 44.0, 0.72), smoothstep(0.02, 0.2, canyon) * (1.0 - smoothstep(0.85, 1.0, canyon)));
   // outlying buttes
+  // (gated by the two-octave field so the fine octave cannot raise lone pointed cones, and
+  //  flat-topped once the mask passes 0.6 so small buttes end in a table rather than a tip)
   let bt = fbm(q * 36.0 + vec2f(0.9, 0.2), vec2i(36), 3, 0.5);
-  let butte = smoothstep(0.15, 0.21, bt) * (1.0 - hm) * (1.0 - smoothstep(2300.0, 3600.0, hd)) * (1.0 - basin);
+  let bt2 = fbm(q * 36.0 + vec2f(0.9, 0.2), vec2i(36), 2, 0.5);
+  let butte = smoothstep(0.15, 0.19, bt) * smoothstep(0.16, 0.22, bt2) * (1.0 - hm) * (1.0 - smoothstep(2300.0, 3600.0, hd)) * (1.0 - basin);
+  let bk = smoothstep(0.0, 0.6, butte);
   h = mix(h, hh, hm);
   let bH = 300.0 + fbm(q * 6.0, vec2i(6), 2, 0.5) * 160.0;
-  var hb = mix(h, bH, butte);
-  hb = mix(hb, terrace(hb, 36.0, 0.6), 4.0 * butte * (1.0 - butte));
+  var hb = mix(h, bH, bk);
+  hb = mix(hb, terrace(hb, 36.0, 0.6), 4.0 * bk * (1.0 - bk));
   h = max(h, hb);
+
+  let vl = vistaLedge(p);
+  h = mix(h, vl.y, vl.x);
   return h;
 }
 
@@ -177,11 +201,13 @@ fn genFinal(@builtin(global_invocation_id) id: vec3u) {
     per *= 2;
   }
   let amp = clamp((h0 - 80.0) * 0.065, 0.0, 85.0);
-  let amt = smoothstep(0.08, 0.55, slope);
+  // (the vista ledge keeps its crisp lip: no gullies or ripples on the shelf)
+  let keep = 1.0 - vistaLedge(p).x;
+  let amt = smoothstep(0.08, 0.55, slope) * keep;
   var h = h0 + (e.x - 0.2) * amp * amt;
   // dune ripples / soft rolling detail on gentle lowlands
   let uv = p / WORLD_L;
-  h += fbm(uv * 512.0, vec2i(512), 3, 0.5) * 2.5 * (1.0 - smoothstep(0.1, 0.35, slope));
+  h += fbm(uv * 512.0, vec2i(512), 3, 0.5) * 2.5 * (1.0 - smoothstep(0.1, 0.35, slope)) * keep;
   textureStore(outR32, px, vec4f(h, 0.0, 0.0, 1.0));
   // crease (0 gully .. 1 ridge), slope-based rockiness
   let crease = sat(e.x * 0.6 + 0.5);

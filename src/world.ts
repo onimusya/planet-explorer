@@ -23,6 +23,9 @@ const az = (deg: number, dist: number, ox: number, oz: number): [number, number]
 export const VISTA_P: [number, number] = [6000, 9300];
 export const VISTA_AZ = 10;
 export const VISTA_DIR: [number, number] = [Math.sin(VISTA_AZ * D2R), -Math.cos(VISTA_AZ * D2R)];
+// Camera spot of the Arrival Vista and the level shelf cut into the cliff face around it.
+export const VISTA_CAM: [number, number] = [VISTA_P[0] + VISTA_DIR[0] * 30, VISTA_P[1] + VISTA_DIR[1] * 30];
+export const VISTA_LEDGE = 175;
 export const LAKE_C = az(30, 1800, ...VISTA_P);
 export const HIGHLANDS_C = az(5, 4800, ...VISTA_P);
 const VALLEY_C = az(78, 3600, ...VISTA_P);
@@ -54,6 +57,8 @@ export function wgslPrelude(): string {
     `const CLOUD_COVER: f32 = ${f(CLOUD_COVER)};`,
     `const VISTA_P: vec2f = ${v2(VISTA_P)};`,
     `const VISTA_DIR: vec2f = ${v2(VISTA_DIR)};`,
+    `const VISTA_CAM: vec2f = ${v2(VISTA_CAM)};`,
+    `const VISTA_LEDGE: f32 = ${f(VISTA_LEDGE)};`,
     `const LAKE_C: vec2f = ${v2(LAKE_C)};`,
     `const HIGHLANDS_C: vec2f = ${v2(HIGHLANDS_C)};`,
     `const VALLEY_A: vec2f = ${v2(VALLEY_A)};`,

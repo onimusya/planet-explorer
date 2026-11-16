@@ -8,6 +8,8 @@ fn ecology(s: u32, p: vec2f, h: f32) -> Eco {
   o.dens = 0.0;
   o.scale = 1.0;
   if (h < WATER_Y + 0.7) { return o; }
+  // nothing but grass right at the vista camera's feet
+  if (length(wrapD2(p - VISTA_CAM)) < 7.0) { return o; }
   let a = attrAt(p); // crease, lush, ao, rock
   let g = gradAt(p);
   let slope = length(g);
@@ -22,7 +24,9 @@ fn ecology(s: u32, p: vec2f, h: f32) -> Eco {
     case 0u: {
       // groves in lush lowlands and on the vista plateau rim; sparse in valley/highlands
       let gr = smoothstep(-0.02, 0.22, grove + lush * 0.15 - 0.08);
-      o.dens = gr * smoothstep(0.2, 0.55, lush + 0.15) * flat * alt * (1.0 - valley * 0.75) * (1.0 - high * 0.85) * 0.85;
+      // (none on the vista ledge: the composed hero flora frames that shot)
+      let vclr = smoothstep(70.0, 120.0, length(wrapD2(p - VISTA_CAM)));
+      o.dens = gr * smoothstep(0.2, 0.55, lush + 0.15) * flat * alt * (1.0 - valley * 0.75) * (1.0 - high * 0.85) * 0.85 * vclr;
       o.scale = 0.85 + 0.35 * gr;
     }
     case 1u: {

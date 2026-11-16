@@ -48,7 +48,7 @@ async function main() {
   {
     // A. Arrival Vista: on the cliff lip; sun just off the left edge, gas giant right of centre over the lake
     const x = VISTA_P[0] + VISTA_DIR[0] * 30, z = VISTA_P[1] + VISTA_DIR[1] * 30;
-    setPose(0, x, ground(x, z) + 12, z, ...dirAz(18, -10));
+    setPose(0, x, ground(x, z) + 4.5, z, ...dirAz(18, -4));
     // B. Bioluminescent Valley: above the floor near the head of the valley, looking down its axis
     const ax = VALLEY_B[0] - VALLEY_A[0], az = VALLEY_B[1] - VALLEY_A[1];
     const vx = VALLEY_A[0] + ax * 0.15, vz = VALLEY_A[1] + az * 0.15;
@@ -245,6 +245,7 @@ async function main() {
     view: (i: number) => goPose(i, false),
     pose: (x: number, y: number, z: number, dx: number, dy: number, dz: number) => { camera.setPose(x, y, z, dx, dy, dz); r.resetHistory = true; },
     ground: (x: number, z: number) => r.terrain.heightAt(x, z),
+    hprobe: (x: number, z: number) => r.terrain.probe(x, z).then((a) => Array.from(a)),
     bench: () => { benchDone = false; benchStart(); bench.start = performance.now(); },
     benchDone: () => benchDone,
     overlay: (on: boolean) => { r.overlayOn = on; },

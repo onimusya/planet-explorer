@@ -62,12 +62,23 @@ fn meadowColorP(pt: vec2f, v: f32, valley: f32, highland: f32) -> vec3f {
 fn meadowColor(p: vec2f, v: f32, valley: f32, highland: f32) -> vec3f {
   return meadowColorP(meadowPatch(p), v, valley, highland);
 }
+// Arrival-vista shelf (vistaLedge in terrain_gen): ground cover runs over its rounded lip and the rock
+// detail is suppressed there, so the first frame's foreground reads as a grassy cliff edge. 0..1.
+fn ledgeGrass(p: vec2f) -> f32 {
+  let lc = wrapD2(p - VISTA_CAM);
+  if (dot(lc, lc) > 14400.0) { return 0.0; }
+  let la = dot(lc, VISTA_DIR);
+  let ls = dot(lc, vec2f(-VISTA_DIR.y, VISTA_DIR.x));
+  let lipA = 19.0 + fbm(p / WORLD_L * 512.0, vec2i(512), 2, 0.5) * (2.5 + abs(ls) * 0.25) - ls * ls * 0.003;
+  return (1.0 - smoothstep(lipA - 7.0, lipA - 4.0, la)) * smoothstep(-40.0, -25.0, la) * (1.0 - smoothstep(45.0, 62.0, abs(ls)));
+}
 // Grass coverage 0..1, shared by the blade field and the terrain's far canopy so the two always agree.
 // a = attrAt(p) (crease, lush, ao, rock), slope = |grad|, h = height.
 fn meadowCover(p: vec2f, a: vec4f, slope: f32, h: f32) -> f32 {
   let n = fbm(p / 32.0, vec2i(512), 2, 0.5);
   let lush = a.y + n * 0.35 + 0.22 + valleyMask(p) * 0.3 + highlandMask(p) * 0.15;
-  return smoothstep(0.25, 0.5, lush) * (1.0 - smoothstep(0.42, 0.62, slope + a.w * 0.3)) * (1.0 - smoothstep(1100.0, 1250.0, h));
+  let steep = mix(1.0 - smoothstep(0.42, 0.62, slope + a.w * 0.3), 1.0, ledgeGrass(p));
+  return smoothstep(0.25, 0.5, lush) * steep * (1.0 - smoothstep(1100.0, 1250.0, h));
 }
 // Travelling wind-gust brightness waves over meadows (shared by blades and the far canopy).
 fn meadowWave(p: vec2f) -> f32 {

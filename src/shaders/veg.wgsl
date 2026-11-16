@@ -160,10 +160,13 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
     m.rough = 0.45;
     m.trans = 0.25;
   } else if (part == 3.0) { // gills: bioluminescent underside, ribs anti-aliased, brightest at the rim
-    let rib = 0.5 + 0.5 * cos(uv.x * TAU * GILL_RIBS) * ribAA;
+    // lamella spacing wanders (phase-modulated ribs) so the underside never reads as a ribbed umbrella
+    let wob = sin(uv.x * TAU * 7.0 + seed * 40.0) * 1.7 + sin(uv.x * TAU * 17.0 + seed * 13.0) * 0.6;
+    let rib = 0.5 + 0.5 * cos(uv.x * TAU * GILL_RIBS + wob) * ribAA;
     let c = mix(vec3f(0.0, 0.42, 1.0), vec3f(0.30, 0.05, 1.0), fract(seed * 5.1));
-    m.alb = vec3f(0.16, 0.18, 0.24);
-    m.emit = c * (0.4 + 0.6 * rib) * (0.12 + 0.88 * grad * grad) * 0.48 * glow;
+    m.alb = vec3f(0.2, 0.17, 0.22) * (0.7 + 0.3 * rib);
+    let band = smoothstep(0.4, 1.0, grad);
+    m.emit = c * (0.25 + 0.75 * rib) * (0.03 + 0.97 * band * band) * 0.36 * glow;
     m.rough = 0.8;
   } else if (part == 4.0) { // petals
     let tip = smoothstep(0.1, 1.0, grad);

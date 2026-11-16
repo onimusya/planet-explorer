@@ -89,7 +89,7 @@ fn vs(@builtin(vertex_index) vid: u32, @location(0) tile: vec4f) -> VOut {
   if (dcam < 320.0) {
     gy = mix(heightCubic(p), gy, smoothstep(160.0, 320.0, dcam));
     let fade = 1.0 - smoothstep(160.0, 420.0, dcam);
-    gy += terrainDetailG(p, attrAt(p).w) * fade;
+    gy += terrainDetailG(p, attrAt(p).w * (1.0 - ledgeGrass(p))) * fade;
   }
   let R = LOD_D[2] * GC.info.x;
   let edge = 1.0 - smoothstep(R * 0.75, R, dcam);
