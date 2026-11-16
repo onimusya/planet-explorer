@@ -14,7 +14,7 @@ const canvas = document.getElementById('c') as HTMLCanvasElement;
 const loadEl = document.getElementById('load') as HTMLDivElement;
 const msgEl = document.getElementById('msg') as HTMLDivElement;
 const barEl = document.querySelector('#bar i') as HTMLElement;
-const helpEl = document.getElementById('help') as HTMLDivElement;
+const helpEl = document.getElementById('help') as HTMLElement;
 const errEl = document.getElementById('err') as HTMLDivElement;
 
 function fail(e: unknown) {
@@ -203,7 +203,12 @@ async function main() {
     const dtMs = now - last;
     last = now;
     const dt = clamp(dtMs / 1000, 0, 0.1);
-    if (!started) { started = true; loadEl.style.opacity = '0'; }
+    if (!started) {
+      started = true;
+      loadEl.style.opacity = '0';
+      // the faded loader must not stay layered over the canvas
+      loadEl.addEventListener('transitionend', () => { loadEl.style.display = 'none'; }, { once: true });
+    }
     if (canvas.width !== wantW || canvas.height !== wantH) {
       canvas.width = wantW; canvas.height = wantH;
       r.resize(wantW, wantH);
