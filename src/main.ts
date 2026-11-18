@@ -6,6 +6,7 @@ import { Camera } from './camera';
 import { Input } from './input';
 import { clamp } from './math';
 import { PASS_NAMES } from './metrics';
+import { clock, DT, TIME, FRAME_MS, CPU_MS } from './clock';
 import {
   PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L,
 } from './world';
@@ -35,7 +36,7 @@ async function main() {
   const r = new Renderer(ctx, camera);
   await r.init((f, m) => { barEl.style.width = (f * 100).toFixed(0) + '%'; msgEl.textContent = m.toUpperCase(); });
   const ground = (x: number, z: number) => Math.max(r.terrain.heightAt(x, z), 0);
-  camera.groundAt = ground;
+  camera.ground = r.terrain;
 
   // --- destinations ---
   const setPose = (i: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => {
@@ -79,6 +80,7 @@ async function main() {
     POSES[0], POSES[1] + 400, POSES[2], VISTA_DIR[0], -0.2, VISTA_DIR[1],
   ]);
   const bench = { running: false, start: 0, frames: 0, warm: 0 };
+  const benchSum = new Float64Array(12); // copy of Metrics.sum at the end of the last run
   const benchStart = () => {
     r.metrics.clearGpu();
     r.metrics.gpuEnabled = r.metrics.hasGpu;
@@ -92,6 +94,7 @@ async function main() {
     bench.running = false;
     r.metrics.summarize(bench.frames);
     const S = r.metrics.sum;
+    benchSum.set(S);
     (window as unknown as Record<string, unknown>).__bench = {
       frames: bench.frames, seconds: (performance.now() - bench.start) / 1000,
       avgFps: S[0], low1Fps: S[1], avgMs: S[2], p95Ms: S[3], p99Ms: S[4], maxMs: S[7],
@@ -120,8 +123,6 @@ async function main() {
   let adaptive = urlp.get('adaptive') !== '0';
   const fixedScale = urlp.get('scale');
   if (fixedScale) { r.renderScale = clamp(parseFloat(fixedScale), 0.4, 1); adaptive = false; }
-  let qTimer = 0;
-  let hudTimer = 0;
   const m = r.metrics;
   m.clearText();
 
@@ -132,77 +133,86 @@ async function main() {
     let c = m.put(0, 0, PLANET_NAME);
     c = m.put(0, c, '   SEED ');
     m.hex(0, c, SEED);
+    // values are passed as (array, index) pairs: see Metrics.num
     c = m.put(1, 0, 'FPS ');
-    c = m.num(1, c, S[0], 1);
+    c = m.num(1, c, S, 0, 1);
     c = m.put(1, c, '   1% LOW ');
-    c = m.num(1, c, S[1], 1);
+    c = m.num(1, c, S, 1, 1);
     c = m.put(1, c, '   FRAME ');
-    c = m.num(1, c, S[2], 2);
+    c = m.num(1, c, S, 2, 2);
     m.put(1, c, ' MS');
     c = m.put(2, 0, 'P95 ');
-    c = m.num(2, c, S[3], 2);
+    c = m.num(2, c, S, 3, 2);
     c = m.put(2, c, '  P99 ');
-    c = m.num(2, c, S[4], 2);
+    c = m.num(2, c, S, 4, 2);
     c = m.put(2, c, ' MS   CPU ');
-    c = m.num(2, c, S[5], 2);
+    c = m.num(2, c, S, 5, 2);
     m.put(2, c, ' MS');
     c = m.put(3, 0, 'GPU ');
     if (m.hasGpu) {
-      c = m.num(3, c, S[6], 2);
+      c = m.num(3, c, S, 6, 2);
       c = m.put(3, c, ' MS  P99 ');
-      c = m.num(3, c, S[9], 2);
+      c = m.num(3, c, S, 9, 2);
       c = m.put(3, c, '  ');
       for (let p = 0; p < m.passMs.length; p++) {
         if (m.passMs[p] <= 0) continue;
         c = m.put(3, c, PASS_NAMES[p]);
         c = m.put(3, c, ' ');
-        c = m.num(3, c, m.passMs[p], 1);
+        c = m.num(3, c, m.passMs, p, 1);
         c = m.put(3, c, ' ');
       }
     } else m.put(3, c, 'N/A (NO TIMESTAMP QUERY)');
     c = m.put(4, 0, 'RES ');
-    c = m.num(4, c, r.iw, 0);
+    c = m.int(4, c, r.iw);
     c = m.put(4, c, 'X');
-    c = m.num(4, c, r.ih, 0);
+    c = m.int(4, c, r.ih);
     c = m.put(4, c, ' (');
-    c = m.num(4, c, r.renderScale * 100, 0);
+    m.v[0] = r.renderScale * 100;
+    c = m.num(4, c, m.v, 0, 0);
     c = m.put(4, c, '%)  OUT ');
-    c = m.num(4, c, r.t.outW, 0);
+    c = m.int(4, c, r.t.outW);
     c = m.put(4, c, 'X');
-    c = m.num(4, c, r.t.outH, 0);
+    c = m.int(4, c, r.t.outH);
     c = m.put(4, c, adaptive ? '  ADAPTIVE' : '  FIXED');
     c = m.put(5, 0, 'QUALITY ');
     c = m.put(5, c, r.quality >= 2 ? 'HIGH' : r.quality >= 1 ? 'MEDIUM' : 'LOW');
     c = m.put(5, c, '   NODES ');
-    c = m.num(5, c, r.terrain.nodeCount, 0);
+    c = m.int(5, c, r.terrain.nodeCount);
     c = m.put(5, c, '   ALT ');
-    c = m.num(5, c, camera.pos[1], 0);
+    c = m.num(5, c, camera.pos, 1, 0);
     c = m.put(5, c, ' M   SPEED ');
-    m.num(5, c, camera.speed, 0);
+    m.v[0] = camera.speed;
+    m.num(5, c, m.v, 0, 0);
     if (bench.running) m.put(6, 0, 'BENCHMARK RUNNING...');
     else if (benchDone) {
       c = m.put(6, 0, 'BENCH  AVG ');
-      const b = (window as unknown as { __bench: Record<string, number> }).__bench;
-      c = m.num(6, c, b.avgFps, 1);
+      c = m.num(6, c, benchSum, 0, 1);
       c = m.put(6, c, ' FPS  1% LOW ');
-      c = m.num(6, c, b.low1Fps, 1);
+      c = m.num(6, c, benchSum, 1, 1);
       c = m.put(6, c, '  P99 ');
-      c = m.num(6, c, b.p99Ms, 2);
+      c = m.num(6, c, benchSum, 4, 2);
       c = m.put(6, c, ' MS  GPU ');
-      m.num(6, c, b.gpuAvgMs, 2);
+      m.num(6, c, benchSum, 6, 2);
     }
     ctx.device.queue.writeBuffer(r.post.textBuf, 0, m.text);
   };
 
-  let last = performance.now();
+  // Frame-loop scalars live in typed arrays, not closure variables: a fractional number stored
+  // in a closure variable is boxed into a new heap object (see clock.ts).
+  const lt = new Float64Array(4); // previous rAF timestamp, frame start, quality timer, HUD timer
+  lt[0] = performance.now();
   let started = false;
-  let frameStart = 0;
   const loop = (now: number) => {
     requestAnimationFrame(loop);
-    frameStart = performance.now();
-    const dtMs = now - last;
-    last = now;
-    const dt = clamp(dtMs / 1000, 0, 0.1);
+    // CPU time is taken only while the overlay or the benchmark reports it: every
+    // performance.now() call returns a new heap number. Frame time uses the rAF timestamp.
+    const cpuTimed = r.overlayOn || bench.running;
+    if (cpuTimed) lt[1] = performance.now();
+    clock[FRAME_MS] = now - lt[0];
+    lt[0] = now;
+    clock[DT] = Math.min(Math.max(clock[FRAME_MS] / 1000, 0), 0.1);
+    clock[TIME] = now / 1000;
+    const dt = clock[DT];
     if (!started) {
       started = true;
       loadEl.style.opacity = '0';
@@ -223,24 +233,25 @@ async function main() {
     if (a[5]) { a[5] = 0; helpEl.style.opacity = helpEl.style.opacity === '0' ? '1' : '0'; }
     if (a[6]) { a[6] = 0; benchStart(); bench.start = performance.now(); }
     if (a[7]) { a[7] = 0; adaptive = !adaptive; }
-    camera.update(dt, input);
-    // GPU timing: every frame while HUD/benchmark active, else sampled every 8th frame for adaptivity
-    m.gpuEnabled = m.hasGpu && (r.overlayOn || bench.running || (r.frame & 7) === 0);
-    r.render(dt, now / 1000, ctx.gpu.context.getCurrentTexture().createView());
-    const cpu = performance.now() - frameStart;
+    camera.update(input);
+    // GPU timing runs while something reads it (read back in batches, see Metrics)
+    m.gpuEnabled = m.hasGpu && (r.overlayOn || bench.running || adaptive);
+    const swap = ctx.gpu.context.getCurrentTexture();
+    r.render(ctx.gpu.textureViews ? swap : swap.createView());
+    clock[CPU_MS] = cpuTimed ? performance.now() - lt[1] : NaN;
     if (bench.warm > 0) bench.warm--;
     else if (bench.running) bench.frames++;
-    m.record(dtMs, cpu);
+    m.record();
     // adaptive render scale from GPU time (hysteresis)
-    qTimer += dt;
-    if (adaptive && qTimer > 0.5 && m.hasGpu) {
-      qTimer = 0;
+    lt[2] += dt;
+    if (adaptive && lt[2] > 0.5 && m.hasGpu) {
+      lt[2] = 0;
       const g = m.lastGpu;
-      if (g > 14.8) r.renderScale = clamp(r.renderScale - (g > 18 ? 0.1 : 0.05), 0.5, 1);
-      else if (g > 0 && g < 11.5) r.renderScale = clamp(r.renderScale + 0.05, 0.5, 1);
+      if (g > 14.8) r.renderScale = Math.min(Math.max(r.renderScale - (g > 18 ? 0.1 : 0.05), 0.5), 1);
+      else if (g > 0 && g < 11.5) r.renderScale = Math.min(Math.max(r.renderScale + 0.05, 0.5), 1);
     }
-    hudTimer += dt;
-    if (r.overlayOn && hudTimer > 0.25) { hudTimer = 0; writeHud(); }
+    lt[3] += dt;
+    if (r.overlayOn && lt[3] > 0.25) { lt[3] = 0; writeHud(); }
   };
   requestAnimationFrame(loop);
 
@@ -262,7 +273,9 @@ async function main() {
     vegStats: () => r.veg.stats,
     volDebug: (m: number) => { r.vol.debug = m; },
     passMs: () => Array.from(r.metrics.passMs),
-    info: () => ({ adapter: gpu.adapterName, timestamps: gpu.timestamps, internal: [r.iw, r.ih], out: [r.t.outW, r.t.outH], worldL: WORLD_L }),
+    frames: () => r.frame,
+    renderer: r, // for scripts/heap-sample.mjs --app (probes the app's own pass descriptors)
+    info: () => ({ adapter: gpu.adapterName, timestamps: gpu.timestamps, textureViews: gpu.textureViews, internal: [r.iw, r.ih], out: [r.t.outW, r.t.outH], worldL: WORLD_L }),
   };
   (window as unknown as Record<string, unknown>).__pe = api;
   if (urlp.get('bench') === '1') setTimeout(() => api.bench(), 2500);

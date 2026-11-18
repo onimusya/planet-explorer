@@ -11,7 +11,9 @@ const GRID = 64;
 const MAXN = 768; // per list
 const QIDX = (GRID / 2) * (GRID / 2) * 6;
 const BLOCKS = HMAP_N / 64;
+const BLOCK_M = WORLD_L / BLOCKS; // 256 m
 const CPU_N = HMAP_N / 4;
+const STACK = 4 * LODS; // the walk keeps at most 3 waiting nodes per level, plus the current one
 
 export class Terrain {
   hTex!: GPUTexture;
@@ -34,6 +36,14 @@ export class Terrain {
   private morph = new Float32Array(64);
   readonly planes = new Float64Array(20);
   private cam = new Float64Array(3);
+  readonly q = new Float64Array(3); // height query registers: x, z in; height out
+  // quadtree walk stack: node x, z, LOD, height bounds and squared camera distance
+  private stX = new Float64Array(STACK);
+  private stZ = new Float64Array(STACK);
+  private stL = new Int32Array(STACK);
+  private stMn = new Float64Array(STACK);
+  private stMx = new Float64Array(STACK);
+  private stD = new Float64Array(STACK);
   nodeCount = 0;
   rangeScale = 1;
 
@@ -220,17 +230,23 @@ export class Terrain {
     return out;
   }
 
-  // CPU height query (bilinear on the 16 m grid).
-  heightAt(x: number, z: number): number {
-    const s = (CPU_N / WORLD_L);
-    let fx = x * s, fz = z * s;
+  // CPU height query (bilinear on the 16 m grid). Per-frame callers use the query registers:
+  // write x, z into q[0], q[1], call heightQ(), read the height from q[2]. No fractional number
+  // crosses the call, so nothing is boxed (see clock.ts).
+  heightQ(): void {
+    const q = this.q, s = CPU_N / WORLD_L, M = CPU_N - 1; // CPU_N is a power of two
+    let fx = q[0] * s, fz = q[1] * s;
     const ix = Math.floor(fx), iz = Math.floor(fz);
     fx -= ix; fz -= iz;
     const g = this.cpuGrid;
-    const w = (i: number) => ((i % CPU_N) + CPU_N) % CPU_N;
-    const x0 = w(ix), x1 = w(ix + 1), z0 = w(iz) * CPU_N, z1 = w(iz + 1) * CPU_N;
+    const x0 = ix & M, x1 = (ix + 1) & M, z0 = (iz & M) * CPU_N, z1 = ((iz + 1) & M) * CPU_N;
     const a = g[z0 + x0], b = g[z0 + x1], c = g[z1 + x0], d = g[z1 + x1];
-    return a + (b - a) * fx + (c - a) * fz + (a - b - c + d) * fx * fz;
+    q[2] = a + (b - a) * fx + (c - a) * fz + (a - b - c + d) * fx * fz;
+  }
+  heightAt(x: number, z: number): number {
+    this.q[0] = x; this.q[1] = z;
+    this.heightQ();
+    return this.q[2];
   }
 
   // ------------------------------------------------------------------------------------------
@@ -291,8 +307,10 @@ export class Terrain {
   }
 
   // ------------------------------------------------------------------------------------------
-  // CDLOD selection. camX/Y/Z: wrapped camera position. vp: camera-relative viewProj (unjittered).
-  select(camX: number, camY: number, camZ: number, vp: Float32Array) {
+  // CDLOD selection. camPos: wrapped camera position. vp: camera-relative viewProj (unjittered).
+  // The quadtree walk is iterative and its helpers take stack indices: a recursive walk passes
+  // fractional numbers through calls, which boxes hundreds of them per frame (see clock.ts).
+  select(camPos: Float64Array, vp: Float32Array) {
     const pl = this.planes;
     // left, right, bottom, top, near (reversed-Z: clip.z <= clip.w)
     for (let i = 0; i < 4; i++) {
@@ -303,13 +321,35 @@ export class Terrain {
       pl[i * 4 + 3] = vp[15] + sgn * vp[12 + row];
     }
     pl[16] = vp[3] - vp[2]; pl[17] = vp[7] - vp[6]; pl[18] = vp[11] - vp[10]; pl[19] = vp[15] - vp[14];
-    this.cam[0] = camX; this.cam[1] = camY; this.cam[2] = camZ;
+    const cam = this.cam;
+    cam[0] = camPos[0]; cam[1] = camPos[1]; cam[2] = camPos[2];
     this.counts.fill(0);
     const rs = LEAF << (LODS - 1);
     const R = this.ranges[LODS - 1];
-    const x0 = Math.floor((camX - R) / rs), x1 = Math.floor((camX + R) / rs);
-    const z0 = Math.floor((camZ - R) / rs), z1 = Math.floor((camZ + R) / rs);
-    for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) this.node(x * rs, z * rs, rs, LODS - 1);
+    const x0 = Math.floor((cam[0] - R) / rs), x1 = Math.floor((cam[0] + R) / rs);
+    const z0 = Math.floor((cam[2] - R) / rs), z1 = Math.floor((cam[2] + R) / rs);
+    const sx = this.stX, sz = this.stZ, sl = this.stL, ranges = this.ranges;
+    for (let rz = z0; rz <= z1; rz++) for (let rx = x0; rx <= x1; rx++) {
+      sx[0] = rx * rs; sz[0] = rz * rs; sl[0] = LODS - 1;
+      if (!this.inRange(0)) continue;
+      let sp = 1;
+      while (sp > 0) {
+        const i = --sp;
+        if (!this.visible(i)) continue;
+        const lod = sl[i], x = sx[i], z = sz[i], size = LEAF << lod;
+        if (lod === 0) { this.add(0, x, z, size, 0); continue; }
+        const rc = ranges[lod - 1];
+        if (this.stD[i] > rc * rc) { this.add(0, x, z, size, lod); continue; }
+        // Children replace this entry on the stack, pushed in reverse so quadrant 0 is walked
+        // first. A child outside its own LOD range is drawn as a quarter of this patch instead.
+        const h = size / 2;
+        for (let q = 3; q >= 0; q--) {
+          sx[sp] = x + (q & 1) * h; sz[sp] = z + (q >> 1) * h; sl[sp] = lod - 1;
+          if (this.inRange(sp)) sp++;
+          else this.add(1 + q, x, z, size, lod);
+        }
+      }
+    }
     let total = 0;
     for (let l = 0; l < 5; l++) {
       const b = l * 5;
@@ -326,41 +366,43 @@ export class Terrain {
     q.writeBuffer(this.indirectBuf, 0, this.indirect);
   }
 
-  private bounds(x: number, z: number, size: number, out: Float64Array) {
-    const bs = WORLD_L / BLOCKS; // 256 m
-    let lv = 0;
-    let s = bs;
+  // Loads the height bounds of stack entry i (x, z and LOD set) from the min/max pyramid, stores
+  // its squared distance to the camera, and returns whether it lies within its LOD range.
+  private inRange(i: number): boolean {
+    const lod = this.stL[i], size = LEAF << lod, x = this.stX[i], z = this.stZ[i];
+    let lv = 0, s = BLOCK_M;
     while (s < size && lv < this.pyr.length - 1) { s *= 2; lv++; }
     const n = BLOCKS >> lv;
-    const bx = (((Math.floor(x / s) % n) + n) % n), bz = (((Math.floor(z / s) % n) + n) % n);
-    const a = this.pyr[lv];
-    out[0] = a[(bz * n + bx) * 2];
-    out[1] = a[(bz * n + bx) * 2 + 1];
-  }
-  private bb = new Float64Array(2);
-
-  private boxDist2(x: number, z: number, size: number, mn: number, mx: number): number {
+    const bx = ((Math.floor(x / s) % n) + n) % n, bz = ((Math.floor(z / s) % n) + n) % n;
+    const a = this.pyr[lv], o = (bz * n + bx) * 2;
+    const mn = a[o], mx = a[o + 1];
+    this.stMn[i] = mn; this.stMx[i] = mx;
     const c = this.cam;
     const dx = Math.max(x - c[0], 0, c[0] - (x + size));
     const dy = Math.max(mn - c[1], 0, c[1] - mx);
     const dz = Math.max(z - c[2], 0, c[2] - (z + size));
-    return dx * dx + dy * dy + dz * dz;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    this.stD[i] = d2;
+    const r = this.ranges[lod];
+    return d2 <= r * r;
   }
 
-  private inFrustum(x: number, z: number, size: number, mn: number, mx: number): boolean {
-    const c = this.cam, pl = this.planes;
-    const ax = x - c[0], az = z - c[2], bx = ax + size, bz = az + size;
+  // Frustum test of stack entry i (bounds loaded by inRange).
+  private visible(i: number): boolean {
+    const c = this.cam, pl = this.planes, size = LEAF << this.stL[i];
+    const ax = this.stX[i] - c[0], az = this.stZ[i] - c[2], bx = ax + size, bz = az + size;
     // curvature lowers distant terrain: extend the box downward conservatively
     const far = Math.max(Math.abs(ax), Math.abs(bx)) ** 2 + Math.max(Math.abs(az), Math.abs(bz)) ** 2;
-    const ay = mn - c[1] - far / (2 * PLANET_R), by = mx - c[1];
-    for (let i = 0; i < 5; i++) {
-      const p0 = pl[i * 4], p1 = pl[i * 4 + 1], p2 = pl[i * 4 + 2], p3 = pl[i * 4 + 3];
+    const ay = this.stMn[i] - c[1] - far / (2 * PLANET_R), by = this.stMx[i] - c[1];
+    for (let k = 0; k < 5; k++) {
+      const p0 = pl[k * 4], p1 = pl[k * 4 + 1], p2 = pl[k * 4 + 2], p3 = pl[k * 4 + 3];
       const px = p0 > 0 ? bx : ax, py = p1 > 0 ? by : ay, pz = p2 > 0 ? bz : az;
       if (p0 * px + p1 * py + p2 * pz + p3 < 0) return false;
     }
     return true;
   }
 
+  // x, z and size are whole metres, so they pass as small integers without boxing.
   private add(list: number, x: number, z: number, size: number, lod: number) {
     const n = this.counts[list];
     if (n >= MAXN) return;
@@ -369,20 +411,4 @@ export class Terrain {
     this.counts[list] = n + 1;
   }
 
-  private node(x: number, z: number, size: number, lod: number): boolean {
-    this.bounds(x, z, size, this.bb);
-    const mn = this.bb[0], mx = this.bb[1];
-    const r = this.ranges[lod];
-    if (this.boxDist2(x, z, size, mn, mx) > r * r) return false;
-    if (!this.inFrustum(x, z, size, mn, mx)) return true;
-    if (lod === 0) { this.add(0, x, z, size, 0); return true; }
-    const rc = this.ranges[lod - 1];
-    if (this.boxDist2(x, z, size, mn, mx) > rc * rc) { this.add(0, x, z, size, lod); return true; }
-    const h = size / 2;
-    for (let q = 0; q < 4; q++) {
-      const cx = x + (q & 1) * h, cz = z + (q >> 1) * h;
-      if (!this.node(cx, cz, h, lod - 1)) this.add(1 + q, x, z, size, lod);
-    }
-    return true;
-  }
 }

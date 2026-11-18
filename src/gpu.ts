@@ -8,7 +8,26 @@ export interface Gpu {
   canvas: HTMLCanvasElement;
   timestamps: boolean;
   hfilter: boolean;
+  textureViews: boolean; // a texture can stand in for its default view in a render pass
   adapterName: string;
+}
+
+// Texture-view shorthand (a recent WebGPU addition): passing the swap-chain texture as the
+// attachment saves a createView() call, and its allocation, every frame.
+async function detectTextureViews(device: GPUDevice): Promise<boolean> {
+  const t = device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  device.pushErrorScope('validation');
+  let ok = true;
+  try {
+    const e = device.createCommandEncoder();
+    e.beginRenderPass({ colorAttachments: [{ view: t, loadOp: 'clear', storeOp: 'store' }] }).end();
+    e.finish();
+  } catch {
+    ok = false; // older implementations reject a texture here with a TypeError
+  }
+  if (await device.popErrorScope()) ok = false;
+  t.destroy();
+  return ok;
 }
 
 export async function initGpu(canvas: HTMLCanvasElement): Promise<Gpu> {
@@ -48,7 +67,8 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<Gpu> {
   context.configure({ device, format, alphaMode: 'opaque' });
   const info = adapter.info;
   const adapterName = info ? `${info.vendor} ${info.architecture || info.description || ''}`.trim() : 'unknown';
-  return { device, adapter, context, format, canvas, timestamps, hfilter, adapterName };
+  const textureViews = await detectTextureViews(device);
+  return { device, adapter, context, format, canvas, timestamps, hfilter, textureViews, adapterName };
 }
 
 export const U = GPUBufferUsage;

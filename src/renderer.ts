@@ -14,6 +14,9 @@ import { FO } from './frame';
 import { tex2d, T } from './gpu';
 import { m4, m4mul, m4invert, m4perspRevInf, m4viewBasis, m4ortho, halton, v3, v3cross, v3norm, v3set } from './math';
 import { SUN_DIR, WORLD_L } from './world';
+import { clock, DT, TIME } from './clock';
+
+const NEAR = 0.15; // near plane (m)
 
 export const SHADOW_SIZE = 2048;
 export const CASCADES = 4;
@@ -32,17 +35,20 @@ export class Renderer {
   grassScale = 1;
   private shadowDescs: GPURenderPassDescriptor[] = [];
   private shadowBundles: GPURenderBundle[][] = [];
-  private tswShBegin: GPURenderPassTimestampWrites | undefined;
-  private tswShEnd: GPURenderPassTimestampWrites | undefined;
   private splits = new Float64Array([24, 90, 360, 1500]);
   private lv = m4();
   private lp = m4();
   private lm = m4();
+  // light basis (the sun is static)
   private lr = v3();
   private lu = v3();
   private lf = v3();
-  private tmp3 = v3();
   vegScale = 1;
+  // per-frame scalars that only change on resize, and the TAA jitter sequence (Halton 2,3)
+  private aspect = 1;
+  private tanHalfFov = 1;
+  private jitter = new Float64Array(32);
+  private wcam = v3(); // camera position wrapped into the world tile
   metrics: Metrics;
   private waterBundles: GPURenderBundle[] = [];
   private waterColorAtt: GPURenderPassColorAttachment;
@@ -99,6 +105,13 @@ export class Renderer {
     this.mainColorAtt = { view: undefined as unknown as GPUTextureView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } };
     this.mainDepthAtt = { view: undefined as unknown as GPUTextureView, depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: 'store' };
     this.mainDesc = { colorAttachments: [this.mainColorAtt], depthStencilAttachment: this.mainDepthAtt };
+    for (let i = 0; i < 16; i++) {
+      this.jitter[i * 2] = halton(i + 1, 2) - 0.5;
+      this.jitter[i * 2 + 1] = halton(i + 1, 3) - 0.5;
+    }
+    v3set(this.lf, -SUN_DIR[0], -SUN_DIR[1], -SUN_DIR[2]);
+    v3cross(this.lr, this.lf, v3(0, 1, 0)); v3norm(this.lr, this.lr);
+    v3cross(this.lu, this.lr, this.lf);
   }
 
   async init(progress: (f: number, m: string) => void) {
@@ -147,10 +160,6 @@ export class Renderer {
         view: this.shadowTex.createView({ dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1 }),
         depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
     }
-    if (this.metrics.querySet) {
-      this.tswShBegin = { querySet: this.metrics.querySet, beginningOfPassWriteIndex: 2 };
-      this.tswShEnd = { querySet: this.metrics.querySet, endOfPassWriteIndex: 3 };
-    }
     this.recordBundles();
     progress(1, 'Ready');
   }
@@ -194,6 +203,9 @@ export class Renderer {
     this.cpyColorSrc.texture = this.t.color; this.cpyColorDst.texture = this.t.colorCopy;
     this.cpyDepthSrc.texture = this.t.depth; this.cpyDepthDst.texture = this.t.depthCopy;
     this.cpySize[0] = this.t.fullW; this.cpySize[1] = this.t.fullH;
+    this.aspect = outW / outH;
+    this.tanHalfFov = Math.tan(this.camera.fovY / 2);
+    m4perspRevInf(this.projNJ, this.camera.fovY, this.aspect, NEAR, 0, 0);
     this.water.bind(this.t.colorCopy, this.t.depthCopy);
     {
       const be = this.ctx.device.createRenderBundleEncoder({ colorFormats: ['rgba16float'], depthStencilFormat: 'depth32float' });
@@ -218,16 +230,12 @@ export class Renderer {
 
 
   // Stable cascaded shadow maps (bounding spheres, texel-snapped in world space).
-  private computeCascades(aspect: number) {
+  private computeCascades() {
     const cam = this.camera;
     const f = this.ctx.frameData;
-    const tanY = Math.tan(cam.fovY / 2), tanX = tanY * aspect;
+    const tanY = this.tanHalfFov, tanX = tanY * this.aspect;
     const k2 = tanX * tanX + tanY * tanY;
     const lf = this.lf, lr = this.lr, lu = this.lu;
-    v3set(lf, -SUN_DIR[0], -SUN_DIR[1], -SUN_DIR[2]);
-    v3set(this.tmp3, 0, 1, 0);
-    v3cross(lr, lf, this.tmp3); v3norm(lr, lr);
-    v3cross(lu, lr, lf);
     for (let c = 0; c < CASCADES; c++) {
       const near = c === 0 ? 0.2 : this.splits[c - 1];
       const far = this.splits[c];
@@ -255,23 +263,27 @@ export class Renderer {
     }
   }
   // ------------------------------------------------------------------------------------------
-  render(dt: number, time: number, swap: GPUTextureView) {
+  // Encodes and submits one frame. Allocation-free apart from the encoders WebGPU requires: time
+  // comes from clock.ts, and no fractional number is passed through a call.
+  render(swap: GPUTexture | GPUTextureView) {
     const { device } = this.ctx;
     const cam = this.camera;
     const f = this.ctx.frameData;
     const t = this.t;
+    const dt = clock[DT], time = clock[TIME];
     this.time = time;
     this.iw = Math.max(16, Math.round(t.fullW * this.renderScale));
     this.ih = Math.max(16, Math.round(t.fullH * this.renderScale));
     const iw = this.iw, ih = this.ih;
-    const aspect = t.outW / t.outH;
-    // jitter (Halton 2,3), in NDC units of the internal resolution
-    const hi = (this.frame % 16) + 1;
-    const jx = ((halton(hi, 2) - 0.5) * 2) / iw;
-    const jy = ((halton(hi, 3) - 0.5) * 2) / ih;
+    const aspect = this.aspect;
+    // jitter, in NDC units of the internal resolution
+    const hi = (this.frame % 16) * 2;
+    const jx = (this.jitter[hi] * 2) / iw;
+    const jy = (this.jitter[hi + 1] * 2) / ih;
     m4viewBasis(this.view, cam.right, cam.up, cam.fwd);
-    m4perspRevInf(this.proj, cam.fovY, aspect, 0.15, jx, jy);
-    m4perspRevInf(this.projNJ, cam.fovY, aspect, 0.15, 0, 0);
+    // projNJ is built on resize; the jittered projection only differs in two entries
+    this.proj.set(this.projNJ);
+    this.proj[8] = -jx; this.proj[9] = -jy;
     m4mul(this.vp, this.proj, this.view);
     m4mul(this.vpNJ, this.projNJ, this.view);
     m4invert(this.ivp, this.vp);
@@ -285,10 +297,9 @@ export class Renderer {
     f.set(this.vpNJ, FO.viewProjNJ);
     f[FO.camPos] = wx; f[FO.camPos + 1] = py; f[FO.camPos + 2] = wz; f[FO.camPos + 3] = time;
     f[FO.camDelta] = px - cam.prevPos[0]; f[FO.camDelta + 1] = py - cam.prevPos[1]; f[FO.camDelta + 2] = pz - cam.prevPos[2]; f[FO.camDelta + 3] = dt;
-    const th = Math.tan(cam.fovY / 2);
-    f[FO.camFwd] = cam.fwd[0]; f[FO.camFwd + 1] = cam.fwd[1]; f[FO.camFwd + 2] = cam.fwd[2]; f[FO.camFwd + 3] = th;
+    f[FO.camFwd] = cam.fwd[0]; f[FO.camFwd + 1] = cam.fwd[1]; f[FO.camFwd + 2] = cam.fwd[2]; f[FO.camFwd + 3] = this.tanHalfFov;
     f[FO.camRight] = cam.right[0]; f[FO.camRight + 1] = cam.right[1]; f[FO.camRight + 2] = cam.right[2]; f[FO.camRight + 3] = aspect;
-    f[FO.camUp] = cam.up[0]; f[FO.camUp + 1] = cam.up[1]; f[FO.camUp + 2] = cam.up[2]; f[FO.camUp + 3] = 0.15;
+    f[FO.camUp] = cam.up[0]; f[FO.camUp + 1] = cam.up[1]; f[FO.camUp + 2] = cam.up[2]; f[FO.camUp + 3] = NEAR;
     f[FO.jitter + 2] = f[FO.jitter]; f[FO.jitter + 3] = f[FO.jitter + 1];
     f[FO.jitter] = jx; f[FO.jitter + 1] = jy;
     f[FO.screen] = iw; f[FO.screen + 1] = ih; f[FO.screen + 2] = 1 / iw; f[FO.screen + 3] = 1 / ih;
@@ -296,10 +307,15 @@ export class Renderer {
     f[FO.outSize] = t.outW; f[FO.outSize + 1] = t.outH; f[FO.outSize + 2] = 1 / t.outW; f[FO.outSize + 3] = 1 / t.outH;
     f[FO.misc] = this.frame; f[FO.misc + 1] = this.renderScale; f[FO.misc + 2] = this.quality; f[FO.misc + 3] = 1;
     f[FO.sunColor + 3] = this.exposure;
-    f[FO.extra] = py - this.terrain.heightAt(px, pz);
-    this.computeCascades(aspect);
+    const tq = this.terrain.q;
+    tq[0] = px; tq[1] = pz;
+    this.terrain.heightQ();
+    f[FO.extra] = py - tq[2];
+    this.computeCascades();
     device.queue.writeBuffer(this.ctx.frameBuf, 0, f);
-    this.terrain.select(wx, py, wz, this.vpNJ);
+    const wc = this.wcam;
+    wc[0] = wx; wc[1] = py; wc[2] = wz;
+    this.terrain.select(wc, this.vpNJ);
     this.veg.setPlanes(this.terrain.planes, this.vegScale);
     this.grass.update(this.terrain.planes, this.grassScale, 1);
     this.post.taaData[0] = this.resetHistory ? 1 : 0;
@@ -309,10 +325,9 @@ export class Renderer {
     device.queue.writeBuffer(this.post.finalU, 0, this.post.finalData);
 
     const m = this.metrics;
-    const ts = m.gpuEnabled && m.hasGpu;
     const enc = device.createCommandEncoder();
     // 1. atmosphere LUTs
-    this.computeDesc.timestampWrites = ts ? m.tsw[0] : undefined;
+    this.computeDesc.timestampWrites = m.ts(0);
     let cp = enc.beginComputePass(this.computeDesc);
     this.atmo.encodeFrame(cp);
     this.veg.encodeCull(cp, this.worldBG);
@@ -321,13 +336,13 @@ export class Renderer {
     // 1b. shadow cascades
     for (let c = 0; c < CASCADES; c++) {
       const d = this.shadowDescs[c];
-      d.timestampWrites = ts ? (c === 0 ? this.tswShBegin : c === CASCADES - 1 ? this.tswShEnd : undefined) : undefined;
+      d.timestampWrites = c === 0 ? m.tsBegin(1) : c === CASCADES - 1 ? m.tsEnd(1) : undefined;
       const sp = enc.beginRenderPass(d);
       sp.executeBundles(this.shadowBundles[c]);
       sp.end();
     }
     // 2. main opaque pass
-    this.mainDesc.timestampWrites = ts ? m.tsw[2] : undefined;
+    this.mainDesc.timestampWrites = m.ts(2);
     const rp = enc.beginRenderPass(this.mainDesc);
     rp.setViewport(0, 0, iw, ih, 0, 1);
     rp.setScissorRect(0, 0, iw, ih);
@@ -336,7 +351,7 @@ export class Renderer {
     // 2b. water (needs a copy of the opaque colour/depth for refraction + SSR)
     enc.copyTextureToTexture(this.cpyColorSrc, this.cpyColorDst, this.cpySize);
     enc.copyTextureToTexture(this.cpyDepthSrc, this.cpyDepthDst, this.cpySize);
-    this.waterDesc.timestampWrites = ts ? m.tsw[3] : undefined;
+    this.waterDesc.timestampWrites = m.ts(3);
     const wp = enc.beginRenderPass(this.waterDesc);
     wp.setViewport(0, 0, iw, ih, 0, 1);
     wp.setScissorRect(0, 0, iw, ih);
@@ -344,19 +359,19 @@ export class Renderer {
     wp.end();
     // 3. volumetric clouds + fog (half resolution)
     const ci = this.frame & 1;
-    this.volDesc.timestampWrites = ts ? m.tsw[4] : undefined;
+    this.volDesc.timestampWrites = m.ts(4);
     cp = enc.beginComputePass(this.volDesc);
     this.vol.encode(cp, this.worldBG, ci, iw, ih);
     cp.end();
     // 4. composite + TAA + bloom
-    this.postDesc.timestampWrites = ts ? m.tsw[5] : undefined;
+    this.postDesc.timestampWrites = m.ts(5);
     cp = enc.beginComputePass(this.postDesc);
     this.post.encodeComposite(cp, this.worldBG, iw, ih, ci);
     this.post.encodeTaa(cp, this.hist, t);
     this.post.encodeBloom(cp, this.hist);
     cp.end();
     // 5. final
-    this.post.encodeFinal(enc, swap, this.hist, ts ? m.tsw[6] : undefined);
+    this.post.encodeFinal(enc, swap, this.hist, m.ts(6));
     m.resolve(enc, this.frame);
     this.cmd[0] = enc.finish();
     device.queue.submit(this.cmd);

@@ -1,15 +1,17 @@
 // Six-degree-of-freedom free-flight camera with smoothing, cinematic fly-to and scripted paths.
+// update() runs every frame and allocates nothing: it reads the time step from clock.ts and
+// keeps intermediate scalars in typed arrays (see clock.ts for why).
 import { Input, K } from './input';
-import { v3, q4, qaxis, qmul, qnorm, qrot, qslerp, qlookDir, clamp, type V3, type Q4 } from './math';
+import { v3, q4, qmul, qnorm, qrot, qslerp, qlookDir, qlookDirV, clamp, type V3, type Q4 } from './math';
+import { clock, DT } from './clock';
 
 export interface Pose { pos: V3; q: Q4 }
 
+// Height source for ground clearance: write x, z into q[0], q[1], call heightQ(), read q[2].
+export interface GroundQuery { readonly q: Float64Array; heightQ(): void }
+
 const TMPQ = q4();
 const TMPV = v3();
-
-function smoother(t: number): number {
-  return t * t * t * (t * (t * 6 - 15) + 10);
-}
 
 export class Camera {
   readonly pos = v3();
@@ -22,7 +24,10 @@ export class Camera {
   readonly fovY = (62 * Math.PI) / 180;
   speed = 35;
   private pending = new Float64Array(3); // pending pitch/yaw rotation (rad)
+  private rot = new Float64Array(3); // this frame's pitch, yaw, roll increments (rad)
   private rollVel = 0;
+  private tmp = new Float64Array(1); // ground height from sampleGround()
+  private slerpT = new Float64Array(1);
   // cinematic flight state
   private flying = false;
   private flyT = 0;
@@ -38,7 +43,7 @@ export class Camera {
   private pathDur = 0;
   private pathKeys = 0;
   onPathDone: (() => void) | null = null;
-  groundAt: ((x: number, z: number) => number) | null = null;
+  ground: GroundQuery | null = null;
 
   setPose(x: number, y: number, z: number, dx: number, dy: number, dz: number) {
     this.pos[0] = x; this.pos[1] = y; this.pos[2] = z;
@@ -83,11 +88,29 @@ export class Camera {
     qrot(this.fwd, this.q, 0, 0, -1);
   }
 
-  update(dt: number, input: Input) {
+  // Terrain height under the camera, never below the water surface, into tmp[0].
+  private sampleGround() {
+    const g = this.ground;
+    if (!g) { this.tmp[0] = 0; return; }
+    g.q[0] = this.pos[0]; g.q[1] = this.pos[2];
+    g.heightQ();
+    this.tmp[0] = Math.max(g.q[2], 0);
+  }
+
+  // q = q * rotation about the local axis (0 = x, 1 = y, 2 = z) by rot[axis] radians.
+  private turn(axis: number) {
+    const h = this.rot[axis] * 0.5, s = Math.sin(h);
+    TMPQ[0] = axis === 0 ? s : 0; TMPQ[1] = axis === 1 ? s : 0; TMPQ[2] = axis === 2 ? s : 0;
+    TMPQ[3] = Math.cos(h);
+    qmul(this.q, this.q, TMPQ);
+  }
+
+  update(input: Input) {
+    const dt = clock[DT];
     this.prevPos.set(this.pos);
     const m = input.mouse;
     if (m[2] !== 0) {
-      this.speed = clamp(this.speed * Math.pow(1.3, m[2]), 1, 4000);
+      this.speed = Math.min(Math.max(this.speed * Math.pow(1.3, m[2]), 1), 4000);
       m[2] = 0;
     }
     const sens = 0.0021;
@@ -97,20 +120,22 @@ export class Camera {
     const userActive = this.pending[0] !== 0 || this.pending[1] !== 0 || input.keys[K.W] || input.keys[K.S] || input.keys[K.A] || input.keys[K.D] || input.keys[K.UP] || input.keys[K.DOWN] || input.keys[K.Q] || input.keys[K.E];
     if (userActive && (this.flying || this.path)) { this.flying = false; this.path = null; }
 
-    if (this.path) { this.stepPath(dt); this.updateBasis(); return; }
-    if (this.flying) { this.stepFly(dt); this.updateBasis(); return; }
+    if (this.path) { this.stepPath(); this.updateBasis(); return; }
+    if (this.flying) { this.stepFly(); this.updateBasis(); return; }
 
     // smoothed look
     const f = 1 - Math.exp(-dt / 0.03);
-    const pitch = this.pending[0] * f;
-    const yaw = this.pending[1] * f;
-    this.pending[0] -= pitch;
-    this.pending[1] -= yaw;
+    const rot = this.rot;
+    rot[0] = this.pending[0] * f;
+    rot[1] = this.pending[1] * f;
+    this.pending[0] -= rot[0];
+    this.pending[1] -= rot[1];
     const rollIn = (input.keys[K.Q] ? 1 : 0) - (input.keys[K.E] ? 1 : 0);
     this.rollVel += (rollIn * 1.4 - this.rollVel) * (1 - Math.exp(-dt * 6));
-    if (yaw !== 0) qmul(this.q, this.q, qaxis(TMPQ, 0, 1, 0, yaw));
-    if (pitch !== 0) qmul(this.q, this.q, qaxis(TMPQ, 1, 0, 0, pitch));
-    if (this.rollVel !== 0) qmul(this.q, this.q, qaxis(TMPQ, 0, 0, 1, this.rollVel * dt));
+    rot[2] = this.rollVel * dt;
+    if (rot[1] !== 0) this.turn(1); // yaw
+    if (rot[0] !== 0) this.turn(0); // pitch
+    if (rot[2] !== 0) this.turn(2); // roll
     qnorm(this.q);
     this.updateBasis();
 
@@ -119,9 +144,9 @@ export class Camera {
     const mx = (input.keys[K.D] ? 1 : 0) - (input.keys[K.A] ? 1 : 0);
     const my = (input.keys[K.UP] ? 1 : 0) - (input.keys[K.DOWN] ? 1 : 0);
     let sp = this.speed * (input.keys[K.SHIFT] ? 6 : 1);
-    const g = this.groundAt ? this.groundAt(this.pos[0], this.pos[2]) : 0;
-    const agl = this.pos[1] - g;
-    sp *= clamp(0.55 + agl / 220, 0.55, 5);
+    this.sampleGround();
+    const agl = this.pos[1] - this.tmp[0];
+    sp *= Math.min(Math.max(0.55 + agl / 220, 0.55), 5);
     const tx = (this.fwd[0] * mz + this.right[0] * mx + this.up[0] * my) * sp;
     const ty = (this.fwd[1] * mz + this.right[1] * mx + this.up[1] * my) * sp;
     const tz = (this.fwd[2] * mz + this.right[2] * mx + this.up[2] * my) * sp;
@@ -133,31 +158,36 @@ export class Camera {
     this.pos[1] += this.vel[1] * dt;
     this.pos[2] += this.vel[2] * dt;
     // soft ground clearance (keeps the camera from slipping under the surface)
-    if (this.groundAt) {
-      const gh = this.groundAt(this.pos[0], this.pos[2]) + 1.2;
+    if (this.ground) {
+      this.sampleGround();
+      const gh = this.tmp[0] + 1.2;
       if (this.pos[1] < gh) { this.pos[1] = gh; if (this.vel[1] < 0) this.vel[1] = 0; }
     }
   }
 
-  private stepFly(dt: number) {
-    this.flyT += dt / this.flyDur;
-    const t = clamp(this.flyT, 0, 1);
-    const s = smoother(t);
+  private stepFly() {
+    this.flyT += clock[DT] / this.flyDur;
+    const t = Math.min(Math.max(this.flyT, 0), 1);
+    const s = t * t * t * (t * (t * 6 - 15) + 10); // smootherstep
     const lift = Math.sin(Math.PI * s) * this.arc;
     this.pos[0] = this.fromPos[0] + (this.toPos[0] - this.fromPos[0]) * s;
     this.pos[1] = this.fromPos[1] + (this.toPos[1] - this.fromPos[1]) * s + lift;
     this.pos[2] = this.fromPos[2] + (this.toPos[2] - this.fromPos[2]) * s;
-    if (this.groundAt) {
-      const gh = this.groundAt(this.pos[0], this.pos[2]) + 25 * Math.sin(Math.PI * s);
+    if (this.ground) {
+      this.sampleGround();
+      const gh = this.tmp[0] + 25 * Math.sin(Math.PI * s);
       if (this.pos[1] < gh) this.pos[1] = gh;
     }
-    qslerp(this.q, this.fromQ, this.toQ, smoother(clamp(t * 1.15, 0, 1)));
+    // orientation leads the position slightly: smootherstep of 1.15 t
+    const u = Math.min(t * 1.15, 1);
+    this.slerpT[0] = u * u * u * (u * (u * 6 - 15) + 10);
+    qslerp(this.q, this.fromQ, this.toQ, this.slerpT);
     if (this.flyT >= 1) this.flying = false;
   }
 
-  private stepPath(dt: number) {
+  private stepPath() {
     const keys = this.path!;
-    this.pathT += dt / this.pathDur;
+    this.pathT += clock[DT] / this.pathDur;
     const n = this.pathKeys;
     if (this.pathT >= n - 1) {
       this.pathT = n - 1;
@@ -175,6 +205,6 @@ export class Camera {
       const v = 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
       if (c < 3) this.pos[c] = v; else TMPV[c - 3] = v;
     }
-    qlookDir(this.q, TMPV[0], TMPV[1], TMPV[2]);
+    qlookDirV(this.q, TMPV);
   }
 }

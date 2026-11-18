@@ -69,7 +69,7 @@ The overlay shows the following, computed over the last 240 frames:
 - the planet name and seed;
 - FPS, 1% low FPS and average frame time;
 - P95 and P99 frame time, and CPU time;
-- GPU time, GPU P99 and the GPU time of each pass;
+- GPU time, GPU P99 and the GPU time of each pass (the mean over the latest 16-frame readback);
 - internal and output resolution, render scale and adaptive state;
 - quality tier, terrain node count, altitude and flight speed;
 - the last benchmark result.
@@ -81,8 +81,8 @@ The final shader draws it with a bitmap font, so it causes no DOM updates.
 ### How it is measured
 
 - **Frame time**: the time between `requestAnimationFrame` callbacks.
-- **CPU time**: JavaScript time from the start of the frame callback until after `queue.submit`.
-- **GPU time**: timestamp queries around every pass. The frame value is the span from the first pass start to the last pass end. Results come back through a ring of three readback buffers, so the CPU never waits for them.
+- **CPU time**: JavaScript time from the start of the frame callback until after `queue.submit`. It is measured only while the overlay or the benchmark runs, because each `performance.now()` call allocates.
+- **GPU time**: timestamp queries around every pass. The frame value is the span from the first pass start to the last pass end. Timestamps for 16 frames are collected before each readback, into a ring of three readback buffers, so the CPU never waits for them.
 - **1% low**: 1000 divided by the mean of the slowest 1% of frame times.
 - **Benchmark (B)**: a scripted 40 s flight through all three destinations (9 keyframes, 5 s per segment). The first 30 frames are excluded. Results appear in the overlay and in `window.__bench`.
 
@@ -96,22 +96,27 @@ The final shader draws it with a bitmap font, so it causes no DOM updates.
 
 ### Flythrough benchmark at 1920×1080
 
-| | Adaptive resolution (default) | Fixed 100% scale |
-|---|---|---|
-| Frames measured | 3,379 | 3,279 |
-| Average FPS | 87.3 | 86.5 |
-| 1% low FPS | 54.4 | 54.4 |
-| Frame time avg / P95 / P99 / max | 11.46 / 18.20 / 18.30 / 18.80 ms | 11.56 / 18.20 / 18.30 / 18.70 ms |
-| CPU time avg / P99 | 0.38 / 0.70 ms | 0.37 / 0.60 ms |
-| GPU time avg / P95 / P99 | 11.57 / 15.28 / 15.87 ms | 11.91 / 15.83 / 16.85 ms |
-| Internal resolution | 1920×1080 at the end of the run | 1920×1080 |
+Three runs of the current build in one session:
+
+| | Adaptive (run 1) | Adaptive (run 2) | Fixed 100% scale |
+|---|---|---|---|
+| Frames measured | 4,143 | not recorded | 4,154 |
+| Average FPS | 108.0 | 109.9 | 112.1 |
+| 1% low FPS | 57.8 | 54.8 | 66.8 |
+| Frame time avg / P95 / P99 / max | 9.26 / 12.20 / 12.30 / 18.30 ms | P99 18.20 ms | 8.92 / 12.20 / 12.30 / 18.30 ms |
+| CPU time avg / P99 | 0.27 / 0.50 ms | not recorded | 0.26 / 0.50 ms |
+| GPU time avg / P95 / P99 | 9.19 / 11.49 / 13.27 ms | 9.02 / – / 14.47 ms | 8.85 / 10.93 / 12.49 ms |
+| Internal resolution at the end | 1920×1080 | 1920×1080 | 1920×1080 |
 
 How to read these numbers:
-- Frame times snap to multiples of the display's 6.06 ms refresh interval. The P95 and P99 frame times of 18.2 ms are frames that took three refreshes, and the 1% low of 54.4 FPS comes from the same frames.
-- GPU time decides whether 60 FPS holds:
-  - With adaptive resolution, GPU P99 is 15.9 ms, inside the 16.7 ms budget.
-  - At a fixed 100% scale, GPU P99 is 16.9 ms, so about 1% of frames go over budget.
+- Frame times snap to multiples of the display's 6.06 ms refresh interval:
+  - A P99 of 12.3 ms is two refreshes. A P99 of 18.2 ms means at least 1% of frames took three.
+  - The 1% low comes from those slowest frames.
+- GPU time decides whether 60 FPS holds. GPU P99 stayed between 12.5 and 14.5 ms in every run, inside the 16.7 ms budget.
+- In the adaptive runs the scale stayed at or returned to 100%, so they measure the same work as the fixed run.
 - The CPU needs under 1 ms per frame.
+- **Run-to-run variance is large.** The same session also benchmarked the previous build twice and got 91.3 and 105.5 FPS average, against 108.0 and 109.9 here. The GPU work is identical between the two builds, so most of that gap is likely laptop GPU clock and thermal behaviour, not the code changes.
+- The previous README measured 87.3 FPS on the previous build, in an earlier session.
 
 ### GPU time per pass at each destination
 
@@ -119,20 +124,20 @@ These figures were taken at a fixed 100% scale (1920×1080) and averaged over 4 
 
 | Pass | Work | Vista | Valley | Highlands |
 |---|---|---|---|---|
-| PRE | Sky-view and aerial-perspective LUTs, sky ambient, plant and grass culling (compute) | 0.30 | 0.24 | 0.25 |
-| SHD | Four shadow cascades | 1.57 | 0.87 | 0.22 |
-| MAIN | Terrain, plants, rocks, landmarks, grass | 7.08 | 8.17 | 5.18 |
+| PRE | Sky-view and aerial-perspective LUTs, sky ambient, plant and grass culling (compute) | 0.28 | 0.27 | 0.29 |
+| SHD | Four shadow cascades | 1.58 | 0.88 | 0.22 |
+| MAIN | Terrain, plants, rocks, landmarks, grass | 6.24 | 7.50 | 4.52 |
 | WATR | Water | 0.05 | 0.01 | 0.03 |
-| VOL | Clouds and fog at half resolution (compute) | 2.39 | 0.90 | 2.13 |
-| POST | Composite, TAA upsampling, bloom (compute) | 0.89 | 0.72 | 0.96 |
-| FIN | Tone mapping, grading, overlay | 0.12 | 0.13 | 0.13 |
-| **Sum** | | **12.40** | **11.04** | **8.89** |
+| VOL | Clouds and fog at half resolution (compute) | 2.53 | 0.92 | 2.07 |
+| POST | Composite, TAA upsampling, bloom (compute) | 0.87 | 0.75 | 0.84 |
+| FIN | Tone mapping, grading, overlay | 0.13 | 0.13 | 0.13 |
+| **Sum** | | **11.67** | **10.47** | **8.11** |
 
 The sum leaves out the colour and depth copies before the water pass and any idle time between passes.
 
 ### Adaptive resolution
 
-Every 0.5 s the app compares the latest GPU time against two thresholds:
+Every 0.5 s the app compares the mean GPU time of the latest 16-frame readback against two thresholds:
 - Above 14.8 ms, the render scale drops by 5%, or by 10% when GPU time is above 18 ms.
 - Below 11.5 ms, it rises by 5%.
 
@@ -147,11 +152,11 @@ Adaptive resolution needs `timestamp-query`. Without it, the scale stays fixed.
 
 | File | Minified | gzip -9 |
 |---|---|---|
-| `assets/index-[hash].js` | 283.5 KiB | 75.4 KiB |
+| `assets/index-[hash].js` | 285.7 KiB | 76.3 KiB |
 | `index.html` | 3.3 KiB | 1.4 KiB |
-| **Total** | **286.7 KiB** (293,616 B) | **76.9 KiB** (78,719 B) |
+| **Total** | **288.9 KiB** (295,869 B) | **77.8 KiB** (79,630 B) |
 
-- **How measured:** `npm run size` after `npm run build`. Vite's own build report uses kB (1,000 bytes) and its own gzip settings, so it prints 290.28 kB and 79.24 kB for the JS file.
+- **How measured:** `npm run size` after `npm run build`. Vite's own build report uses kB (1,000 bytes) and its own gzip settings, so it prints 292.53 kB and 80.20 kB for the JS file.
 - **WGSL share:** about 195 KiB of the minified JS is WGSL source, which compresses to 36 KiB on its own. Shared WGSL includes are repeated in each shader module that uses them.
 - **Nothing else downloads:** no textures, meshes, fonts or audio.
 
@@ -220,7 +225,7 @@ Each frame the CPU updates the frame uniform and a few small parameter blocks, w
 - **Shadow maps for objects only:** the cascades hold only plants, rocks and landmarks. The terrain uses the precomputed shadow heights.
 - **Reduced resolution:** clouds and fog render at half resolution with temporal accumulation. TAA upsampling lets the adaptive scale lower the internal resolution.
 - **Depth:** reversed-Z with an infinite far plane and a 32-bit depth buffer covers the 0.15 m near plane and the distant horizon in one buffer.
-- **GPU timers:** timestamps are read every frame only while the overlay or the benchmark runs. Otherwise they are read every 8th frame, for adaptive resolution.
+- **GPU timers:** timestamps are written every frame while the overlay, the benchmark or adaptive resolution needs them. They are read back once per 16 frames.
 - **No per-frame DOM work:** the overlay is drawn by the final shader.
 
 ### Memory and allocations
@@ -231,37 +236,81 @@ Each frame the CPU updates the frame uniform and a few small parameter blocks, w
 - no shader compilation after startup;
 - no blocking readbacks.
 
-**How the code meets them:**
-- **Per-frame state:** it lives in preallocated typed arrays. These include the frame uniform mirror, the camera and matrix math (`math.ts` writes into arrays that the caller passes in), input state, terrain node lists, indirect arguments and the metrics rings. Uploads use `queue.writeBuffer` from those arrays.
-- **GPU resources:** buffers, textures and bind groups are created at startup, or again when the window is resized.
+**Result:** application code makes no per-frame allocations. Everything the frame loop still allocates comes from WebGPU and browser calls that create objects by design. The only app-created object is one typed-array view per 16-frame GPU timing readback, which is the only way to read the mapped data. The measurements behind this are below.
+
+**How the code meets the targets:**
+- **Per-frame state** lives in preallocated typed arrays. These hold:
+  - the frame uniform mirror, input state, terrain node lists, indirect arguments and the metrics rings;
+  - the camera and matrix math (`math.ts` writes into arrays that the caller passes in).
+
+  Uploads use `queue.writeBuffer` from those arrays.
+- **No fractional numbers cross function calls.** V8 stores a fractional number in a new heap object ("boxes" it) whenever it is passed to or returned from a call the JIT did not inline, or stored in a closure variable. Per-frame code avoids all three:
+  - The time step, animation time, frame time and CPU time live in `clock.ts`, a shared `Float64Array`.
+  - Height queries use `Terrain.q`: write x and z, call `heightQ()`, read the height. Nothing passes through the call.
+  - The terrain quadtree walk is iterative. Its helpers take stack indices. Patch coordinates are whole metres, which V8 passes as small integers without boxing.
+  - The HUD's number formatter reads values from (array, index) pairs.
+  - Per-frame math helpers take vectors: `qlookDirV`, and `qslerp`, whose parameter is passed in an array.
+  - The camera's look rotation reads its angles from an array.
+  - Constant inputs (projection, jitter sequence, sun basis) are built at startup or on resize.
+- **No hidden allocations from built-ins.**
+  - `Math.hypot` is not used per frame: V8's implementation allocates a temporary array.
+  - GPU timestamps are read as pairs of 32-bit words instead of BigInts.
+  - The height query no longer creates a closure per call.
+- **Fewer API objects.**
+  - The swap-chain texture goes straight into the final pass. `createView()` is skipped when the browser accepts a texture as an attachment, which `gpu.ts` detects at startup.
+  - GPU timestamps for 16 frames are collected per readback.
+  - CPU time, which needs two `performance.now()` calls, is measured only while the overlay or the benchmark shows it.
+- **GPU resources** (buffers, textures, bind groups) are created at startup, or again when the window is resized.
 - **Pipelines:** all shader modules and pipelines are created at startup with `create*PipelineAsync`. There are no synchronous pipeline calls.
-- **GPU timings:** they come back through `mapAsync` into a ring of three buffers. The frame loop checks `mapState` and never waits.
+- **No blocking readbacks:** GPU timings come back through `mapAsync` into a ring of three buffers. The frame loop polls `mapState` and never waits.
 
-**What the WebGPU API allocates every frame anyway:**
-- one command encoder, ten pass encoders and one command buffer;
-- the swap-chain texture and its view (`getCurrentTexture().createView()`);
-- for each GPU timing readback, the `mapAsync` Promise and the `ArrayBuffer` that `getMappedRange()` returns.
+**How it was measured.** `scripts/heap-sample.mjs` drives Chrome's sampling heap profiler. It also counts short-lived objects the garbage collector has already freed. It reports bytes per frame by function and, with `--objects`, object counts by size.
 
-**Measured result: the target is not met yet.** `scripts/heap-sample.mjs` runs the Chrome DevTools sampling heap profiler for 6 s. It also counts objects the garbage collector has already freed. The run was at the Vista with the overlay hidden, on the dev server, with 443 frames at 74 FPS. It recorded 6,305 bytes per frame (453 KiB/s):
+**Production build:** sampled at the Vista with the overlay hidden, after 60 s of warm-up. Over 20 s it saw 1,605 frames at 80 FPS, with a sampling interval of 64 B. It measured **262 bytes per frame** in total:
 
-| Bytes per frame | Where |
-|---|---|
-| 5,588 | `Terrain.node` (the CDLOD quadtree walk) |
-| 307 | `Renderer.render` (includes the WebGPU encoders above) |
-| 104 | the frame loop in `main.ts` (includes the swap-chain texture and view) |
-| 95 | `Metrics.poll` (timestamp readback, including a `BigUint64Array` view and BigInt reads) |
-| 87 | `qnorm` in `math.ts` (`Math.hypot` with four arguments) |
-| 37 | `Terrain.heightAt` |
-| 36 | `Camera.update` |
-| 18 | `Post.encodeFinal` |
-| 33 | other (idle, V8 internals) |
+| Bytes per frame | Where | What it is |
+|---|---|---|
+| 202 | `Renderer.render` | WebGPU objects: 1 command encoder, 3 compute and 6 render pass encoders, 1 command buffer, plus the browser's bookkeeping for `writeBuffer` and `submit` |
+| 16 | `Post.encodeFinal` | the final render pass encoder |
+| 16 | the frame loop | the swap-chain texture from `getCurrentTexture()` |
+| 15 | `Metrics.poll` | once per 16 frames: the `mapAsync` Promise, the `ArrayBuffer` from `getMappedRange()`, and the `Uint32Array` view over it |
+| 11 | no JavaScript on the stack | one 12 B object per frame created by the browser outside JavaScript, most likely the timestamp it passes to the `requestAnimationFrame` callback |
+| 2 | V8 API | browser-side |
 
-`Terrain.node` creates no objects in the source. The likely cause is V8 storing floating-point values as heap objects when they are passed to and returned from the helper methods it calls (`bounds`, `boxDist2`, `inFrustum`). This has not been confirmed yet.
+**Checking that `render` contains only API objects.** The `--probe` mode replays the same WebGPU calls in a separate named function, once per event-loop task, as in a frame. The calls are:
+- 1 encoder;
+- 3 compute passes and 6 render passes;
+- 2 texture copies;
+- 4 buffer writes;
+- `finish` and `submit`.
 
-To repeat the measurement, open the app in Chrome and get a DevTools WebSocket URL. Use `agent-browser get cdp-url`, or start Chrome with `--remote-debugging-port=9222` and read `webSocketDebuggerUrl` from http://127.0.0.1:9222/json/version. Then run:
+Measured this way, the calls alone allocate 207 bytes, against 202 bytes for `render` with all its logic. Single calls measured the same way cost about 16 bytes per encoder, pass encoder, command buffer, texture or texture view. Buffer writes add 20 to 30 bytes per task in total, whether there is one write or six. `submit` adds nothing measurable.
+
+**Other situations:**
+- **Overlay on:** frames also allocate two 12 B numbers for the CPU timer. The HUD text update, 4 times a second, added about 6 B per frame in a sample taken right after it was switched on.
+- **Benchmark flight:** a second run, started right after the first, allocated 284 B per frame. That is the same list plus the CPU timer. The first flight after loading also showed about 190 B per frame in the camera path code. That code had not run before, and the cost disappears once V8 optimizes it.
+- **The first seconds after loading:** V8 runs new code unoptimized at first, which boxes every fractional intermediate. This is why early samples are much higher. One sample of the previous version 13 s after load showed 6.3 KB per frame, most of it in the recursive terrain walk.
+
+**Before these changes:** the previous version measured 725 B per frame after the same warm-up, on the dev server. The extra 460 B came from:
+- boxed numbers in the frame loop, `Renderer.render`, `Camera.update` and `qnorm`;
+- `Math.hypot`;
+- `Terrain.heightAt` and its per-call closure;
+- BigInt timestamp reads and a typed-array view every 8 frames;
+- the swap-chain texture view;
+- two `performance.now()` calls per frame.
+
+At 80 FPS the remaining 262 B per frame is about 21 KiB/s of short-lived objects, all created inside browser APIs.
+
+**To repeat the measurement:**
+1. Open the app in Chrome.
+2. Get a DevTools WebSocket URL: use `agent-browser get cdp-url`, or start Chrome with `--remote-debugging-port=9222` and read `webSocketDebuggerUrl` from http://127.0.0.1:9222/json/version.
+3. Keep the window visible: Chrome pauses `requestAnimationFrame` in hidden windows.
+4. Run:
 
 ```sh
-node scripts/heap-sample.mjs <ws-url> 6 localhost:5173
+node scripts/heap-sample.mjs <ws-url> 20 localhost:4173 --interval=64 --objects   # frame loop
+node scripts/heap-sample.mjs <ws-url> 60 localhost:4173 --probe                    # single API calls
+node scripts/heap-sample.mjs <ws-url> 60 localhost:4173 --app                      # the app's own pass descriptors
 ```
 
 The debug API below allocates when you call it. For example, `hprobe` creates a readback buffer per call. None of it runs unless called.
@@ -277,8 +326,10 @@ The debug API below allocates when you call it. For example, `hprobe` creates a 
 | `cam()` | The camera position and forward vector |
 | `bench()`, `benchDone()` | Start the benchmark, check whether it finished |
 | `stats()` | Frame statistics over the last 600 frames |
-| `passMs()` | The latest GPU time of each pass |
-| `info()` | Adapter, timestamp support, internal and output resolution |
+| `passMs()` | GPU time of each pass, averaged over the latest 16-frame readback |
+| `frames()` | Number of frames rendered |
+| `info()` | Adapter, timestamp support, texture-as-attachment support, internal and output resolution |
+| `renderer` | The renderer object, for the `--app` allocation probe |
 | `overlay(on)`, `scale(s)`, `adaptive(on)` | Overlay, fixed render scale, adaptive resolution |
 | `ground(x, z)` | Height from the 16 m CPU grid |
 | `hprobe(x, z)` | 64×64 block of exact GPU heights from (x, z), read back once |
@@ -287,12 +338,18 @@ The debug API below allocates when you call it. For example, `hprobe` creates a 
 
 Scripts in `scripts/`:
 - `size.mjs`: bundle sizes.
-- `heap-sample.mjs`: the allocation measurement above.
+- `heap-sample.mjs`: the allocation measurement above. Options:
+  - `--interval=N`: sampling interval in bytes;
+  - `--objects`: object counts by size;
+  - `--sizes`: raw sample sizes;
+  - `--probe`: single browser API calls;
+  - `--app`: the app's own pass descriptors.
 - PowerShell tools for Windows. They drive Chrome through the `agent-browser` CLI with a session named `planet`:
   - `shot.ps1`: screenshots;
   - `ev.ps1`: evaluate JavaScript in the page;
   - `perf.ps1`: per-pass GPU timings;
-  - `crop.ps1`: crop screenshots.
+  - `crop.ps1`: crop screenshots;
+  - `front.ps1`: restore and focus the app's window, so the page stays visible during measurements.
 
 ## Screenshots
 
@@ -322,6 +379,5 @@ scripts/             measurement and screenshot tools
 - Glowing spores and other airborne particles are not implemented yet.
 - Exposure is fixed. There is no eye adaptation.
 - The sun never moves, so there is no day/night cycle. Several precomputed fields depend on this.
-- Per-frame JavaScript allocations remain (see Memory and allocations).
 - The adaptive system changes only the render scale. The quality tier stays at High.
 - The destinations are tuned for the default seed (`0x7a11e5` in `src/world.ts`).

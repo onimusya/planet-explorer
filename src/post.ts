@@ -196,7 +196,8 @@ export class Post {
     }
   }
 
-  encodeFinal(enc: GPUCommandEncoder, view: GPUTextureView, hi: number, tsw: GPURenderPassTimestampWrites | undefined) {
+  // view: the swap-chain texture itself where the browser accepts textures as attachments
+  encodeFinal(enc: GPUCommandEncoder, view: GPUTexture | GPUTextureView, hi: number, tsw: GPURenderPassTimestampWrites | undefined) {
     this.finalAttachment.view = view;
     this.finalPassDesc.timestampWrites = tsw;
     const pass = enc.beginRenderPass(this.finalPassDesc);

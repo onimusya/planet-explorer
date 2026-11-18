@@ -1,5 +1,6 @@
 // Allocation-free math helpers. All functions write into caller-provided typed arrays.
 // Matrices are column-major Float32Array(16) (WGSL mat4x4f layout).
+// Helpers used every frame take their fractional inputs in arrays too (see clock.ts).
 
 export type V3 = Float64Array; // length 3
 export type Q4 = Float64Array; // quaternion x,y,z,w
@@ -29,7 +30,7 @@ export function v3len(a: V3): number {
   return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
 }
 export function v3norm(o: V3, a: V3): V3 {
-  const l = v3len(a) || 1;
+  const l = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) || 1;
   o[0] = a[0] / l; o[1] = a[1] / l; o[2] = a[2] / l;
   return o;
 }
@@ -46,7 +47,8 @@ export function v3dot(a: V3, b: V3): number {
 
 // Quaternions -------------------------------------------------------------------------------
 export function qnorm(q: Q4): Q4 {
-  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  // not Math.hypot: V8's hypot builtin allocates a temporary array
+  const l = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]) || 1;
   q[0] /= l; q[1] /= l; q[2] /= l; q[3] /= l;
   return q;
 }
@@ -75,7 +77,9 @@ export function qrot(o: V3, q: Q4, x: number, y: number, z: number): V3 {
   o[2] = z + qw * tz + (qx * ty - qy * tx);
   return o;
 }
-export function qslerp(o: Q4, a: Q4, b: Q4, t: number): Q4 {
+// The parameter is tt[0], passed in an array because the camera calls this every frame of a flight.
+export function qslerp(o: Q4, a: Q4, b: Q4, tt: Float64Array): Q4 {
+  const t = tt[0];
   let bx = b[0], by = b[1], bz = b[2], bw = b[3];
   let c = a[0] * bx + a[1] * by + a[2] * bz + a[3] * bw;
   if (c < 0) { c = -c; bx = -bx; by = -by; bz = -bz; bw = -bw; }
@@ -112,14 +116,18 @@ export function qfromBasis(o: Q4, r: V3, u: V3, b: V3): Q4 {
   }
   return qnorm(o);
 }
-const _r = v3(), _u = v3(), _b = v3();
-// Look-at orientation (world up = +Y), camera looks toward dir.
-export function qlookDir(o: Q4, dx: number, dy: number, dz: number): Q4 {
-  v3set(_b, -dx, -dy, -dz); v3norm(_b, _b);
+const _r = v3(), _u = v3(), _b = v3(), _d = v3();
+// Look-at orientation (world up = +Y): the camera looks along d (any length).
+export function qlookDirV(o: Q4, d: V3): Q4 {
+  _b[0] = -d[0]; _b[1] = -d[1]; _b[2] = -d[2]; v3norm(_b, _b);
   v3set(_u, 0, 1, 0);
   v3cross(_r, _u, _b); v3norm(_r, _r);
   v3cross(_u, _b, _r);
   return qfromBasis(o, _r, _u, _b);
+}
+export function qlookDir(o: Q4, dx: number, dy: number, dz: number): Q4 {
+  _d[0] = dx; _d[1] = dy; _d[2] = dz;
+  return qlookDirV(o, _d);
 }
 
 // Matrices -----------------------------------------------------------------------------------

@@ -1,9 +1,14 @@
 // Frame-time statistics, GPU timestamp queries and the GPU text overlay buffer.
 // All per-frame paths write into preallocated typed arrays.
+import { clock, FRAME_MS, CPU_MS } from './clock';
 
 export const RING = 2048;
 export const PASS_NAMES = ['PRE', 'SHD', 'MAIN', 'WATR', 'VOL', 'POST', 'FIN'] as const;
 export const NPASS = PASS_NAMES.length;
+// Frames of GPU timestamps per readback. Each readback allocates (mapAsync returns a Promise,
+// every mapping a new ArrayBuffer, and reading it needs a view), so frames are read in batches.
+export const BATCH = 16;
+const QUERIES = BATCH * NPASS * 2;
 
 export class Metrics {
   readonly frameMs = new Float32Array(RING).fill(NaN);
@@ -13,79 +18,123 @@ export class Metrics {
   idx = 0;
   // summary
   readonly sum = new Float64Array(12); // fps, low1, avg, p95, p99, cpu, gpu, max, gpuP95, gpuP99, count, cpuP99
-  readonly passMs = new Float32Array(NPASS);
-  // GPU timestamps
+  readonly passMs = new Float32Array(NPASS); // mean time per pass over the latest batch (ms)
+  private passAcc = new Float64Array(NPASS);
+  // GPU timestamps: one query set holds BATCH frame slots of NPASS begin/end pairs
   querySet: GPUQuerySet | null = null;
   private resolveBuf: GPUBuffer | null = null;
   private readBufs: GPUBuffer[] = [];
   private readState = new Uint8Array(3); // 0 free, 1 copy queued, 2 mapping
-  private readFrame = new Int32Array(3);
+  private readFrame = new Int32Array(3); // frame index of the batch's first slot
+  private readMask = new Uint32Array(3); // slots of the batch that carry timestamps
   private ringSlot = 0;
+  private slot = 0; // this frame's slot in the current batch
+  private mask = 0; // slots of the current batch that carry timestamps
   gpuEnabled = false;
-  readonly tsw: GPUComputePassTimestampWrites[] = [];
+  private readonly tsw: GPUComputePassTimestampWrites[] = [];
+  private readonly tswBegin: GPUComputePassTimestampWrites[] = [];
+  private readonly tswEnd: GPUComputePassTimestampWrites[] = [];
   readonly text = new Uint32Array(64 * 10);
-  lastGpu = 0;
+  readonly v = new Float64Array(1); // value register for num()
+  lastGpu = 0; // mean GPU frame time of the latest batch (ms)
 
   constructor(device: GPUDevice, timestamps: boolean) {
-    if (timestamps) {
-      this.querySet = device.createQuerySet({ type: 'timestamp', count: NPASS * 2 });
-      this.resolveBuf = device.createBuffer({ size: NPASS * 2 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-      for (let i = 0; i < 3; i++) this.readBufs.push(device.createBuffer({ size: NPASS * 2 * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
-      for (let i = 0; i < NPASS; i++) this.tsw.push({ querySet: this.querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 });
+    if (!timestamps) return;
+    const querySet = device.createQuerySet({ type: 'timestamp', count: QUERIES });
+    this.querySet = querySet;
+    this.resolveBuf = device.createBuffer({ size: QUERIES * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    for (let i = 0; i < 3; i++) this.readBufs.push(device.createBuffer({ size: QUERIES * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    for (let f = 0; f < BATCH; f++) for (let p = 0; p < NPASS; p++) {
+      const b = (f * NPASS + p) * 2;
+      this.tsw.push({ querySet, beginningOfPassWriteIndex: b, endOfPassWriteIndex: b + 1 });
+      this.tswBegin.push({ querySet, beginningOfPassWriteIndex: b });
+      this.tswEnd.push({ querySet, endOfPassWriteIndex: b + 1 });
     }
   }
 
   get hasGpu() { return this.querySet !== null; }
 
+  // Timestamp writes for pass p in this frame (undefined while timing is off). tsBegin and tsEnd
+  // serve a pass that spans several encoder passes (the shadow cascades).
+  ts(p: number) { return this.gpuEnabled && this.querySet ? this.tsw[this.slot * NPASS + p] : undefined; }
+  tsBegin(p: number) { return this.gpuEnabled && this.querySet ? this.tswBegin[this.slot * NPASS + p] : undefined; }
+  tsEnd(p: number) { return this.gpuEnabled && this.querySet ? this.tswEnd[this.slot * NPASS + p] : undefined; }
+
   // Called after all passes are encoded (before finish).
+  // At the end of each batch, copies its timestamps into a free readback buffer (the batch is
+  // dropped if all three are still being read).
   resolve(enc: GPUCommandEncoder, frame: number) {
-    if (!this.gpuEnabled || !this.querySet || !this.resolveBuf) return;
-    let slot = -1;
-    for (let i = 0; i < 3; i++) {
-      const s = (this.ringSlot + i) % 3;
-      if (this.readState[s] === 0) { slot = s; break; }
+    if (!this.querySet || !this.resolveBuf) return;
+    if (this.gpuEnabled) this.mask |= 1 << this.slot;
+    if (this.slot === BATCH - 1) {
+      for (let i = 0; i < 3 && this.mask !== 0; i++) {
+        const s = (this.ringSlot + i) % 3;
+        if (this.readState[s] !== 0) continue;
+        enc.resolveQuerySet(this.querySet, 0, QUERIES, this.resolveBuf, 0);
+        enc.copyBufferToBuffer(this.resolveBuf, 0, this.readBufs[s], 0, QUERIES * 8);
+        this.readState[s] = 1;
+        this.readFrame[s] = frame - (BATCH - 1);
+        this.readMask[s] = this.mask;
+        this.ringSlot = (s + 1) % 3;
+        break;
+      }
+      this.mask = 0;
     }
-    if (slot < 0) return;
-    enc.resolveQuerySet(this.querySet, 0, NPASS * 2, this.resolveBuf, 0);
-    enc.copyBufferToBuffer(this.resolveBuf, 0, this.readBufs[slot], 0, NPASS * 2 * 8);
-    this.readState[slot] = 1;
-    this.readFrame[slot] = frame;
-    this.ringSlot = (slot + 1) % 3;
+    this.slot = (this.slot + 1) % BATCH;
   }
 
   // Called after submit. Starts mapping copies and polls finished maps (no promise callbacks).
   poll() {
-    if (!this.gpuEnabled) return;
+    if (!this.querySet) return;
     for (let s = 0; s < 3; s++) {
       const b = this.readBufs[s];
       if (this.readState[s] === 1) {
-        b.mapAsync(GPUMapMode.READ); // WebGPU API returns a Promise (unavoidable); state is polled
+        b.mapAsync(GPUMapMode.READ); // the Promise is not awaited: mapState is polled instead
         this.readState[s] = 2;
       } else if (this.readState[s] === 2 && b.mapState === 'mapped') {
-        const t = new BigUint64Array(b.getMappedRange());
-        let first = Infinity, last = 0;
-        for (let p = 0; p < NPASS; p++) {
-          const a = Number(t[p * 2]), e = Number(t[p * 2 + 1]);
-          if (a > 0 && e >= a) {
-            this.passMs[p] = (e - a) / 1e6;
-            if (a < first) first = a;
-            if (e > last) last = e;
-          } else this.passMs[p] = 0;
-        }
+        // every mapping returns a new ArrayBuffer, so the view cannot be kept
+        this.readBatch(new Uint32Array(b.getMappedRange()), this.readFrame[s], this.readMask[s]);
         b.unmap();
         this.readState[s] = 0;
-        if (last > first) {
-          this.lastGpu = (last - first) / 1e6;
-          this.gpuMs[(this.readFrame[s] & (RING - 1))] = this.lastGpu;
-        }
       }
     }
   }
 
-  record(frameMs: number, cpuMs: number) {
+  // Frame and pass times from one batch. Timestamps are 64-bit nanoseconds, read as pairs of
+  // 32-bit words because BigInt values would allocate.
+  private readBatch(t: Uint32Array, f0: number, mask: number) {
+    const acc = this.passAcc;
+    acc.fill(0);
+    let frames = 0, total = 0;
+    for (let k = 0; k < BATCH; k++) {
+      if ((mask & (1 << k)) === 0) continue;
+      let first = Infinity, last = 0;
+      for (let p = 0; p < NPASS; p++) {
+        const w = (k * NPASS + p) * 4; // word index of the pass's begin timestamp
+        const a = t[w + 1] * 4294967296 + t[w], e = t[w + 3] * 4294967296 + t[w + 2];
+        if (a > 0 && e >= a) {
+          acc[p] += e - a;
+          if (a < first) first = a;
+          if (e > last) last = e;
+        }
+      }
+      if (last > first) {
+        const g = (last - first) / 1e6;
+        this.gpuMs[(f0 + k) & (RING - 1)] = g;
+        total += g;
+        frames++;
+      }
+    }
+    if (frames === 0) return;
+    this.lastGpu = total / frames;
+    for (let p = 0; p < NPASS; p++) this.passMs[p] = acc[p] / frames / 1e6;
+  }
+
+  // Records the frame described by clock[FRAME_MS] and clock[CPU_MS].
+  record() {
     const i = this.idx & (RING - 1);
-    this.frameMs[i] = frameMs;
-    this.cpuMs[i] = cpuMs;
+    this.frameMs[i] = clock[FRAME_MS];
+    this.cpuMs[i] = clock[CPU_MS];
     this.idx++;
   }
 
@@ -111,13 +160,16 @@ export class Metrics {
     S[4] = s[Math.min(n - 1, Math.floor(n * 0.99))];
     S[7] = s[n - 1];
     S[10] = n;
-    // cpu
+    // cpu (only timed while the overlay or the benchmark runs, so it may have gaps)
     s.fill(NaN);
-    let ct = 0;
-    for (let k = 0; k < n; k++) { const v = this.cpuMs[(this.idx - 1 - k) & (RING - 1)]; s[k] = v; ct += v; }
-    S[5] = ct / Math.max(n, 1);
+    let cn = 0, ct = 0;
+    for (let k = 0; k < n; k++) {
+      const v = this.cpuMs[(this.idx - 1 - k) & (RING - 1)];
+      if (v === v) { s[cn++] = v; ct += v; }
+    }
     s.sort();
-    S[11] = s[Math.min(n - 1, Math.floor(n * 0.99))];
+    S[5] = cn ? ct / cn : NaN;
+    S[11] = cn ? s[Math.min(cn - 1, Math.floor(cn * 0.99))] : NaN;
     // gpu (may have gaps)
     s.fill(NaN);
     let gn = 0, gt = 0;
@@ -140,7 +192,10 @@ export class Metrics {
     for (let i = 0; i < s.length && col < 64; i++, col++) this.text[base + col] = s.charCodeAt(i);
     return col;
   }
-  num(row: number, col: number, v: number, dec: number, minInt = 1): number {
+  // Writes src[i] with dec decimals. The value comes in an array so that no fractional number is
+  // passed through the call (see clock.ts); computed values go through this.v.
+  num(row: number, col: number, src: Float32Array | Float64Array, i: number, dec: number, minInt = 1): number {
+    let v = src[i];
     if (v !== v) return this.put(row, col, '--');
     const base = row * 64;
     if (v < 0) { if (col < 64) this.text[base + col++] = 45; v = -v; }
@@ -165,6 +220,11 @@ export class Metrics {
     }
     iv = 0; fp = 0;
     return col;
+  }
+  // Whole numbers pass through calls as small integers, without boxing.
+  int(row: number, col: number, v: number): number {
+    this.v[0] = v;
+    return this.num(row, col, this.v, 0, 0);
   }
   hex(row: number, col: number, v: number): number {
     const base = row * 64;
