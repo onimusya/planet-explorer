@@ -1,6 +1,6 @@
 # Ithra Vael: a procedural WebGPU planet explorer
 
-A free-flight explorer for one alien planet, written in TypeScript and WGSL on native WebGPU. It uses no engine and loads no assets. Terrain, sky, clouds, water, plants, rocks and landmarks are all generated in code, at startup or every frame. The production build is one JavaScript file and `index.html`, 77 KiB gzipped.
+A free-flight explorer for one alien planet, written in TypeScript and WGSL on native WebGPU. It uses no engine. Terrain, sky, clouds, water, plants, animals, rocks and landmarks are all generated in code, at startup or every frame. The code is one JavaScript file and `index.html`, 92 KiB gzipped. The only files it loads are the soundtrack: three ElevenLabs-generated music tracks, one per destination (5.5 MiB of MP3), fetched after the first frame.
 
 The three destinations are part of one continuous world, so you fly between them with no loading screens:
 
@@ -51,6 +51,7 @@ npm run size      # minified and gzip sizes of the files in dist/
 | M | Metrics overlay |
 | B | Run the benchmark |
 | G | Adaptive resolution on/off |
+| N | Music on/off |
 | H | Hide the controls panel |
 
 Speed also scales with height above the ground, from 0.55× near the surface up to 5×. The camera stays at least 1.2 m above the terrain.
@@ -152,13 +153,15 @@ Adaptive resolution needs `timestamp-query`. Without it, the scale stays fixed.
 
 | File | Minified | gzip -9 |
 |---|---|---|
-| `assets/index-[hash].js` | 285.7 KiB | 76.3 KiB |
+| `assets/index-[hash].js` | 348.7 KiB | 90.3 KiB |
 | `index.html` | 3.3 KiB | 1.4 KiB |
-| **Total** | **288.9 KiB** (295,869 B) | **77.8 KiB** (79,630 B) |
+| **Code total** | **352.0 KiB** | **91.7 KiB** |
+| `audio/vista.mp3`, `audio/valley.mp3`, `audio/highlands.mp3` | 1875.6 KiB each | (MP3 does not compress further) |
+| **Total with audio** | **5978.7 KiB** (6,122,139 B) | **5695.3 KiB** (5,831,953 B) |
 
-- **How measured:** `npm run size` after `npm run build`. Vite's own build report uses kB (1,000 bytes) and its own gzip settings, so it prints 292.53 kB and 80.20 kB for the JS file.
-- **WGSL share:** about 195 KiB of the minified JS is WGSL source, which compresses to 36 KiB on its own. Shared WGSL includes are repeated in each shader module that uses them.
-- **Nothing else downloads:** no textures, meshes, fonts or audio.
+- **How measured:** `npm run size` after `npm run build`. Vite's own build report uses kB (1,000 bytes) and its own gzip settings, so it prints 357.06 kB and 96.65 kB for the JS file.
+- **Audio:** 120 s per track at 128 kbit/s. The tracks are fetched after the first frame and never block it; the explorer runs silent if they are missing.
+- **Nothing else downloads:** no textures, meshes or fonts.
 
 ## Architecture
 
@@ -215,6 +218,7 @@ Each frame the CPU updates the frame uniform and a few small parameter blocks, w
 | Shadows | `renderer.ts`, `lighting.wgsl` | Plants, rocks and landmarks render into four cascades that end at 24, 90, 360 and 1500 m, with dithered blending between cascades. Terrain self-shadowing uses the precomputed sun-shadow heights instead. |
 | Post | `post.ts`, `composite.wgsl`, `taa.wgsl`, `bloom.wgsl`, `final.wgsl` | TAA: Halton jitter, a Catmull-Rom history fetch and history rejection from neighbourhood statistics, with upsampling to the output resolution. Bloom: 6 levels, 13-tap downsample with a Karis average, tent upsample. Tone mapping: an ACES fit, plus colour grading, vignette, film grain and sharpening. Exposure is fixed. |
 | Frame, camera, input | `renderer.ts`, `camera.ts`, `input.ts`, `metrics.ts`, `main.ts` | Pass encoding; the free-flight camera with smoothing, fly-to and scripted paths; statistics and GPU timers; destination poses and adaptive resolution. |
+| Music | `music.ts`, `scripts/music.mjs`, `public/audio/` | One instrumental track per region: the Vista track also covers the open country between destinations; the Valley and Highlands tracks start where the shaders' `valleyMask` and `highlandMask` pass about 0.6, and stop again below 0.4, so hovering on a border does not flip the music. Region changes crossfade over about 5 s. Each track is decoded the first time its region is entered, off the main thread. Its faded intro and outro are trimmed and its end crossfaded into its start for a seamless loop, in slices between frames, then it is kept for later visits (about 44 MiB of PCM per track at 48 kHz). Each visit enters the loop at a random point. Audio starts on the first click or key press, as browsers require. `N` mutes and suspends it; hidden tabs suspend it too. |
 | Build | `vite.config.ts`, `ctx.ts` | A WGSL loader that supports `//#include` (each file once per module) and minifies WGSL at the token level for production. `ctx.ts` resolves `#if HFILTER` blocks at startup, depending on `float32-filterable`. |
 
 ### Performance techniques
@@ -335,9 +339,11 @@ The debug API below allocates when you call it. For example, `hprobe` creates a 
 | `hprobe(x, z)` | 64×64 block of exact GPU heights from (x, z), read back once |
 | `vegCounts()`, `vegStats()` | Drawn instances per species, mesh totals |
 | `volDebug(mask)` | Volumetrics debug views |
+| `music()` | Music region, the track playing, audio state, loaded track sizes, loop points |
 
 Scripts in `scripts/`:
 - `size.mjs`: bundle sizes.
+- `music.mjs`: generates the soundtrack (one instrumental track per destination) with the ElevenLabs Music API into `public/audio/`. It reads `ELEVENLABS_API_KEY` from the environment or `~/.media-gen/.env`; `--check` shows the account's credits, `--force` regenerates existing tracks. Without the files the explorer runs silent.
 - `heap-sample.mjs`: the allocation measurement above. Options:
   - `--interval=N`: sampling interval in bytes;
   - `--objects`: object counts by size;
@@ -371,12 +377,12 @@ index.html           page, loading screen, controls panel
 vite.config.ts       WGSL loader and minifier
 src/*.ts             one module per subsystem (see the table above)
 src/shaders/*.wgsl   shaders, combined through //#include
-scripts/             measurement and screenshot tools
+public/audio/        soundtrack (generated by scripts/music.mjs, copied into dist/ as is)
+scripts/             measurement, screenshot and soundtrack tools
 ```
 
 ## Known gaps
 
-- Glowing spores and other airborne particles are not implemented yet.
 - Exposure is fixed. There is no eye adaptation.
 - The sun never moves, so there is no day/night cycle. Several precomputed fields depend on this.
 - The adaptive system changes only the render scale. The quality tier stays at High.

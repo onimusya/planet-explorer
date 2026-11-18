@@ -7,6 +7,7 @@ import { Input } from './input';
 import { clamp } from './math';
 import { PASS_NAMES } from './metrics';
 import { clock, DT, TIME, FRAME_MS, CPU_MS } from './clock';
+import { Music } from './music';
 import {
   PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L, valleyFraming,
 } from './world';
@@ -213,6 +214,7 @@ async function main() {
   const lt = new Float64Array(4); // previous rAF timestamp, frame start, quality timer, HUD timer
   lt[0] = performance.now();
   let started = false;
+  const music = new Music();
   const loop = (now: number) => {
     requestAnimationFrame(loop);
     // CPU time is taken only while the overlay or the benchmark reports it: every
@@ -229,6 +231,7 @@ async function main() {
       loadEl.style.opacity = '0';
       // the faded loader must not stay layered over the canvas
       loadEl.addEventListener('transitionend', () => { loadEl.style.display = 'none'; }, { once: true });
+      music.load(); // after the first frame, so the soundtrack never delays it
     }
     if (canvas.width !== wantW || canvas.height !== wantH) {
       canvas.width = wantW; canvas.height = wantH;
@@ -244,7 +247,9 @@ async function main() {
     if (a[5]) { a[5] = 0; helpEl.style.opacity = helpEl.style.opacity === '0' ? '1' : '0'; }
     if (a[6]) { a[6] = 0; benchStart(); bench.start = performance.now(); }
     if (a[7]) { a[7] = 0; adaptive = !adaptive; }
+    if (a[8]) { a[8] = 0; music.toggle(); }
     camera.update(input);
+    music.update(camera.pos[0], camera.pos[2]);
     // GPU timing runs while something reads it (read back in batches, see Metrics)
     m.gpuEnabled = m.hasGpu && (r.overlayOn || bench.running || adaptive);
     const swap = ctx.gpu.context.getCurrentTexture();
@@ -286,6 +291,7 @@ async function main() {
     faunaStats: () => r.fauna.stats,
     volDebug: (m: number) => { r.vol.debug = m; },
     passMs: () => Array.from(r.metrics.passMs),
+    music: () => music.state(),
     frames: () => r.frame,
     renderer: r, // for scripts/heap-sample.mjs --app (probes the app's own pass descriptors)
     info: () => ({ adapter: gpu.adapterName, timestamps: gpu.timestamps, textureViews: gpu.textureViews, internal: [r.iw, r.ih], out: [r.t.outW, r.t.outH], worldL: WORLD_L }),

@@ -2,7 +2,7 @@
   "name": "planet-explorer",
   "private": true,
   "version": "1.0.0",
-  "description": "Procedural WebGPU alien planet exploration (native WebGPU + WGSL, no engine, no assets)",
+  "description": "Procedural WebGPU alien planet exploration (native WebGPU + WGSL, no engine; everything generated in code except the soundtrack)",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
