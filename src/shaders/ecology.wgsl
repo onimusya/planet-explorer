@@ -65,5 +65,8 @@ fn ecology(s: u32, p: vec2f, h: f32) -> Eco {
       o.scale = 0.7 + a.w * 0.8;
     }
   }
+  // the herd's trail through the valley: no tall flora, trampled ground cover
+  let tr = trailMask(p);
+  if (s == 3u || s == 4u) { o.dens *= 1.0 - 0.8 * tr.y; } else { o.dens *= 1.0 - tr.x; }
   return o;
 }

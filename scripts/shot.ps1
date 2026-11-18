@@ -8,6 +8,7 @@ param(
   [double]$Wait = 3,
   [switch]$Hud,
   [string]$Eval = "",
+  [switch]$ShowHelp,
   [string]$Url = "http://localhost:5173/"
 )
 $root = Split-Path -Parent $PSScriptRoot
@@ -27,6 +28,7 @@ if ($Reload) {
   Start-Sleep -Seconds 1
 }
 $js = "(() => { const p = window.__pe; p.overlay(" + ($(if ($Hud) { "true" } else { "false" })) + ");"
+if (-not $ShowHelp) { $js += " document.getElementById('help').style.opacity = '0';" }
 if ($View -ge 0) { $js += " p.view($View);" }
 if ($Pose -ne "") { $js += " p.pose($Pose);" }
 if ($Eval -ne "") { $js += " $Eval;" }

@@ -14,9 +14,9 @@ $js = @"
     await new Promise(r => setTimeout(r, 50));
     const m = p.passMs(); for (let i = 0; i < m.length; i++) acc[i] += m[i]; n++;
   }
-  const names = ['PRE','SHD','MAIN','WATR','VOL','POST','FIN'];
+  const names = ['PRE','SHD','MAIN','WATR','VOL','POST','FIN','FX'];
   const o = {}; let tot = 0;
-  for (let i = 0; i < 7; i++) { o[names[i]] = +(acc[i] / n).toFixed(2); tot += acc[i] / n; }
+  for (let i = 0; i < 8; i++) { o[names[i]] = +(acc[i] / n).toFixed(2); tot += acc[i] / n; }
   o.SUM = +tot.toFixed(2); o.res = p.info().internal.join('x');
   p.volDebug(0); p.overlay(false);
   return JSON.stringify(o);

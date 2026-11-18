@@ -64,11 +64,16 @@ export class Camera {
     this.fromQ.set(this.q);
     qlookDir(this.toQ, dx, dy, dz);
     const dist = Math.hypot(x - this.pos[0], y - this.pos[1], z - this.pos[2]);
-    this.flyDur = clamp(dist / 450, 3.5, 11);
+    this.flyDur = this.flyDuration(x, y, z);
     this.arc = Math.min(dist * 0.12, 900);
     this.flyT = 0;
     this.flying = true;
     this.vel.fill(0);
+  }
+
+  // Duration (s) of a fly-to from the current position to (x, y, z).
+  flyDuration(x: number, y: number, z: number) {
+    return clamp(Math.hypot(x - this.pos[0], y - this.pos[1], z - this.pos[2]) / 450, 3.5, 11);
   }
 
   // keys: [x, y, z, dx, dy, dz] * n ; segment duration in seconds

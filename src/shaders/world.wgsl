@@ -11,6 +11,7 @@
 @group(1) @binding(7) var noiseTex: texture_3d<f32>; // 128^3 tiling noise (r: perlin-worley, gba: worley fbm)
 @group(1) @binding(8) var weatherTex: texture_2d<f32>; // cloud weather map over WORLD_L: r coverage, g type
 @group(1) @binding(9) var fTex: texture_2d<f32>;       // coarse mipmapped (height, shadow height, occluder dist)
+@group(1) @binding(10) var trailTex: texture_2d<f32>;  // herd trail: r = keep tall flora off, g = trampled ground
 
 const TEXEL: f32 = WORLD_L / f32(HMAP_N);
 
@@ -122,6 +123,12 @@ fn valleyMask(p: vec2f) -> f32 {
   return 1.0 - smoothstep(500.0, 1300.0, d);
 }
 fn highlandMask(p: vec2f) -> f32 { return 1.0 - smoothstep(2000.0, 3600.0, regionDist(p, HIGHLANDS_C)); }
+// Herd trail mask (0 away from the trail): x = flora clearing, y = trampled ground.
+fn trailMask(p: vec2f) -> vec2f {
+  let uv = wrapD2(p - TRAIL_C) / (2.0 * TRAIL_HS) + 0.5;
+  if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return vec2f(0.0); }
+  return textureSampleLevel(trailTex, sLinClamp, uv, 0.0).rg;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Cloud coverage (shared by volumetric clouds and terrain cloud shadows). Periodic over WORLD_L.

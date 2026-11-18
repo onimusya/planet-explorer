@@ -8,6 +8,7 @@
 @group(1) @binding(3) var<storage, read> textBuf: array<u32>; // TEXT_COLS x TEXT_ROWS char codes
 @group(1) @binding(4) var<uniform> FU: vec4f;                 // x bloom strength, y overlay on, z sun screen vis, w sharpen
 @group(1) @binding(5) var<storage, read> expo: array<f32>;    // [0] = adapted exposure
+@group(1) @binding(6) var fxTex: texture_2d<f32>;             // airborne particles (fx.wgsl)
 
 const TEXT_COLS: u32 = 64u;
 const TEXT_ROWS: u32 = 10u;
@@ -77,6 +78,7 @@ fn fs(in: VO) -> @location(0) vec4f {
     let sharp = (lc * 4.0 - luma(n)) * FU.w;
     c *= max(1.0 + sharp / max(lc, 1e-4) * 0.25, 0.5);
   }
+  c += textureLoad(fxTex, ip, 0).rgb;
   let b = textureSampleLevel(bloomTex, sLinClamp, uv, 0.0).rgb;
   c = mix(c, b, FU.x);
   c *= expo[0];

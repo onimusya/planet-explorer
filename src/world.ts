@@ -42,8 +42,81 @@ const tSun = (0.5 * (CLOUD_BOT + CLOUD_TOP) - 420) / SUN_DIR[1];
 export const VISTA_SUNCLEAR: [number, number] = [VISTA_P[0] + SUN_DIR[0] * tSun, VISTA_P[1] + SUN_DIR[2] * tSun];
 export const FOG_MAX = 14000; // ground-fog march distance (m)
 
+// Fauna. The herd walks a looped trail on the valley floor, defined in valley coordinates
+// (u = metres along VALLEY_A -> VALLEY_B, v = metres to the right of the meandering centreline,
+// see shaders/valley.wgsl): a stadium of half length HERD_HL and turn radius HERD_R centred at
+// (HERD_U, HERD_V), clear of the stream that meanders within about 55 m of the centreline.
+export const FAUNA_NC = 10; // herd animals (the last three are young)
+export const FAUNA_BPF = 14; // birds per flock
+export const FAUNA_NB = FAUNA_BPF * 3;
+export const HERD = [640, 82, 40, 13] as const; // HERD_U, HERD_V, HERD_HL, HERD_R
+const vLen = Math.hypot(VALLEY_B[0] - VALLEY_A[0], VALLEY_B[1] - VALLEY_A[1]);
+const vAx: [number, number] = [(VALLEY_B[0] - VALLEY_A[0]) / vLen, (VALLEY_B[1] - VALLEY_A[1]) / vLen];
+const valleyPt = (u: number, v: number): [number, number] => [
+  VALLEY_A[0] + vAx[0] * u - vAx[1] * v, VALLEY_A[1] + vAx[1] * u + vAx[0] * v];
+// Trail mask area (the warp moves the trail up to ~180 m from its unwarped position).
+export const TRAIL_C = valleyPt(HERD[0], HERD[1]);
+// Valley coordinates -> world near the herd's clearing: a linear fit of valleyWorld() (valley.wgsl)
+// through (u, v) = (560, 82) and (700, 82), good to a metre or two around the clearing.
+const herdPt = (u: number, v: number): [number, number] => [
+  8670.6 + (u - 560) * 0.8979 + (v - 82) * 0.4171, 9177.7 - (u - 560) * 0.4171 + (v - 82) * 0.8979];
+// Herd rhythm (fauna.wgsl): walking bouts of HERD_WALK metres at HERD_CRUISE m/s with smooth starts
+// and stops (HERD_RAMP of each bout), then HERD_GRAZE seconds of grazing. The leader is HERD_S0
+// metres along the trail at time 0.
+export const HERD_WALK = 34, HERD_RAMP = 0.22, HERD_CRUISE = 1.4, HERD_GRAZE = 20, HERD_S0 = 236;
+
+// Valley coordinates (u, v) and unit direction at arc length s along the trail loop (valley.wgsl herdPath).
+function herdPath(s: number): [number, number, number, number] {
+  const [hu, hv, hl, hr] = HERD;
+  const len = 4 * hl + 2 * Math.PI * hr;
+  let x = s - len * Math.floor(s / len);
+  if (x < 2 * hl) return [hu - hl + x, hv - hr, 1, 0];
+  x -= 2 * hl;
+  if (x < Math.PI * hr) { const a = x / hr; return [hu + hl + hr * Math.sin(a), hv - hr * Math.cos(a), Math.cos(a), Math.sin(a)]; }
+  x -= Math.PI * hr;
+  if (x < 2 * hl) return [hu + hl - x, hv + hr, -1, 0];
+  const a = (x - 2 * hl) / hr;
+  return [hu - hl - hr * Math.sin(a), hv + hr * Math.cos(a), -Math.cos(a), -Math.sin(a)];
+}
+
+// Valley destination framing at time t: a camera standing in the clearing inside the herd's loop,
+// a few metres past the spot where the herd's walking bout in progress ends (or where it grazes
+// now, unless that stop is nearly over), looking back along the trail. The herd walks in, stops
+// and grazes in front of the camera with the mushroom forest that rims the clearing behind it.
+// Writes camera x, z and look-at x, z into out.
+export function valleyFraming(t: number, out: Float64Array) {
+  const period = HERD_WALK / (HERD_CRUISE * (1 - HERD_RAMP)) + HERD_GRAZE;
+  const k = Math.floor(t / period) + (t % period > period - 8 ? 1 : 0);
+  const lead = HERD_S0 + (k + 1) * HERD_WALK; // leader's position at that stop (fauna.wgsl herdTravel)
+  const c = herdPath(lead - 15); // middle of the formation (adults walk 5 m apart)
+  const a = herdPath(lead + 7);
+  const cam = herdPt(a[0] - a[3] * 12, a[1] + a[2] * 12); // inward normal of the anticlockwise loop
+  const look = herdPt(c[0], c[1]);
+  out[0] = cam[0]; out[1] = cam[1]; out[2] = look[0]; out[3] = look[1];
+}
+export const TRAIL_HS = 320; // half size (m)
+export const TRAIL_N = 320; // texels across (2 m each)
+// Flocks: kettles of gliders circling in view of the three destination cameras (main.ts): centre
+// x, z, altitude (m), kettle radius (m). FLOCK_SCALE sizes the birds (2.6 m wingspan at 1).
+const vistaF = az(16, 190, ...VISTA_CAM); // ~50 m above the vista camera, just left of centre
+// The valley kettle follows the herd along its trail (fauna.wgsl), ~36 m above the clearing's
+// floor and clear of the mushroom caps; its x, z here is only the middle of the trail.
+const valleyF = herdPt(HERD[0], HERD[1]);
+const highCam: [number, number] = [HIGHLANDS_C[0] - 1200, HIGHLANDS_C[1] + 250];
+const highF = az(72, 230, ...highCam); // ~25 m above the highland camera
+export const FLOCKS = [
+  [vistaF[0], vistaF[1], 232, 45],
+  [valleyF[0], valleyF[1], 70, 38],
+  [highF[0], highF[1], 625, 40],
+] as const;
+export const FLOCK_SCALE = [2.6, 1.4, 2.2] as const;
+// Airborne particles: luminous spores over the valley floor, sunlit pollen motes elsewhere.
+export const FX_SPORES = 16384;
+export const FX_MOTES = 8192;
+
 const f = (x: number) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 const v2 = (a: readonly number[]) => `vec2f(${f(a[0])}, ${f(a[1])})`;
+const v4 = (a: readonly number[]) => `vec4f(${a.map(f).join(', ')})`;
 
 export function wgslPrelude(): string {
   return [
@@ -67,6 +140,24 @@ export function wgslPrelude(): string {
     `const RANGE_B: vec2f = ${v2(RANGE_B)};`,
     `const VISTA_SUNCLEAR: vec2f = ${v2(VISTA_SUNCLEAR)};`,
     `const FOG_MAX: f32 = ${f(FOG_MAX)};`,
+    `const FAUNA_NC: u32 = ${FAUNA_NC}u;`,
+    `const FAUNA_BPF: u32 = ${FAUNA_BPF}u;`,
+    `const FAUNA_NB: u32 = ${FAUNA_NB}u;`,
+    `const HERD: vec4f = ${v4(HERD)};`,
+    `const HERD_WALK: f32 = ${f(HERD_WALK)};`,
+    `const HERD_RAMP: f32 = ${f(HERD_RAMP)};`,
+    `const HERD_CRUISE: f32 = ${f(HERD_CRUISE)};`,
+    `const HERD_GRAZE: f32 = ${f(HERD_GRAZE)};`,
+    `const HERD_S0: f32 = ${f(HERD_S0)};`,
+    `const TRAIL_C: vec2f = ${v2(TRAIL_C)};`,
+    `const TRAIL_HS: f32 = ${f(TRAIL_HS)};`,
+    `const TRAIL_N: u32 = ${TRAIL_N}u;`,
+    `const FLOCK0: vec4f = ${v4(FLOCKS[0])};`,
+    `const FLOCK1: vec4f = ${v4(FLOCKS[1])};`,
+    `const FLOCK2: vec4f = ${v4(FLOCKS[2])};`,
+    `const FX_SPORES: u32 = ${FX_SPORES}u;`,
+    `const FX_MOTES: u32 = ${FX_MOTES}u;`,
+    `const FLOCK_SCALE: vec3f = vec3f(${FLOCK_SCALE.map(f).join(', ')});`,
     '',
   ].join('\n');
 }

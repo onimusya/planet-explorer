@@ -127,13 +127,22 @@ fn terrainSurface(wp: vec3f, dist: f32, fw: f32) -> Surface {
   s.n = normalize(mix(n, nGeo, snowW * 0.6));
   s.ao = attr.z * mix(0.7, 1.0, crease);
   s.sheen = grassW;
-  // bioluminescent moss specks on the valley floor
+  // bioluminescent moss specks on the valley floor: round flecks on a jittered 0.67 m grid (one cell
+  // in eight lit), widened to the pixel footprint at constant power and blended to their average
+  // once a pixel spans half a cell, so they never alias; partly trampled away along the herd trail
   var emit = vec3f(0.0);
   if (valley > 0.01 && dist < 900.0) {
-    let sp = hash21(vec2i(floor(p * 1.5)));
-    let spk = smoothstep(0.985, 1.0, sp) * (1.0 - rockW) * valley;
+    let q = p * 1.5;
+    let ci = vec2i(floor(q));
+    let sp = hash21(ci);
+    let fq = fw * 1.5;
+    let r0 = 0.13;
+    let re = max(r0, fq * 0.8);
+    let fl = sq(sat(1.0 - length(fract(q) - 0.25 - 0.5 * hash22(ci + vec2i(7919, 104729))) / re)) * sq(r0 / re) * step(0.875, sp);
+    let m = mix(fl, PI * r0 * r0 / 6.0 * 0.125, smoothstep(0.25, 0.6, fq));
+    let spk = m * (1.0 - rockW) * valley * (1.0 - 0.5 * trailMask(p).y);
     let tw = 0.6 + 0.4 * sin(time() * 1.7 + sp * 60.0);
-    emit = mix(vec3f(0.1, 0.9, 1.0), vec3f(0.8, 0.3, 1.0), fract(sp * 13.0)) * spk * tw * 2.5 * (1.0 - smoothstep(300.0, 900.0, dist));
+    emit = mix(vec3f(0.1, 0.9, 1.0), vec3f(0.8, 0.3, 1.0), fract(sp * 13.0)) * spk * tw * 6.0 * (1.0 - smoothstep(300.0, 900.0, dist));
   }
   s.emit = emit;
   return s;

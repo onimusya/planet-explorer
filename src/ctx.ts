@@ -40,7 +40,7 @@ export function createCtx(gpu: Gpu): Ctx {
   });
   const worldBGL = bgl(device, [
     L.tex(0, gpu.hfilter ? 'float' : 'unfilterable-float'), L.tex(1), L.tex(2), L.tex(3), L.tex(4), L.tex(5, 'float', '3d'),
-    L.storageRO(6), L.tex(7, 'float', '3d'), L.tex(8), L.tex(9),
+    L.storageRO(6), L.tex(7, 'float', '3d'), L.tex(8), L.tex(9), L.tex(10),
   ], 'worldBGL');
   const lightBGL = bgl(device, [L.depth(0, '2d-array')], 'lightBGL');
   const emptyBGL = bgl(device, [], 'empty');

@@ -15,6 +15,7 @@ export interface Targets {
   color: GPUTexture; depth: GPUTexture; lit: GPUTexture; colorCopy: GPUTexture; depthCopy: GPUTexture;
   cloud: GPUTexture[]; fog: GPUTexture; volDepth: GPUTexture;
   hist: GPUTexture[]; bloomDown: GPUTexture; bloomUp: GPUTexture;
+  fx: GPUTexture; // airborne particles (fx.ts), additive HDR at output resolution
 }
 
 export class Post {
@@ -56,7 +57,7 @@ export class Post {
     this.lTaa = bgl(device, [L.tex(0, 'unfilterable-float', '2d', C), L.depth(1, '2d', C), L.tex(2, 'float', '2d', C), L.stTex(3, 'rgba16float'), L.uniform(4, C)]);
     this.lBloom = bgl(device, [L.tex(0, 'float', '2d', C), L.stTex(1, 'rgba16float'), L.tex(2, 'float', '2d', C), L.uniform(3, C)]);
     const F = GPUShaderStage.FRAGMENT;
-    this.lFinal = bgl(device, [L.tex(0, 'unfilterable-float', '2d', F), L.tex(1, 'float', '2d', F), L.storageRO(2, F), L.storageRO(3, F), L.uniform(4, F), L.storageRO(5, F)]);
+    this.lFinal = bgl(device, [L.tex(0, 'unfilterable-float', '2d', F), L.tex(1, 'float', '2d', F), L.storageRO(2, F), L.storageRO(3, F), L.uniform(4, F), L.storageRO(5, F), L.tex(6, 'unfilterable-float', '2d', F)]);
     const [mc, mt, mb, mf] = await Promise.all([
       this.ctx.module(compositeSrc, 'composite'),
       this.ctx.module(taaSrc, 'taa'),
@@ -103,6 +104,7 @@ export class Post {
       hist: [tex2d(device, outW, outH, 'rgba16float', S | B, 'hist0'), tex2d(device, outW, outH, 'rgba16float', S | B, 'hist1')],
       bloomDown: tex2d(device, bw, bh, 'rgba16float', S | B, 'bloomDown', BLOOM_LEVELS),
       bloomUp: tex2d(device, bw, bh, 'rgba16float', S | B, 'bloomUp', BLOOM_LEVELS),
+      fx: tex2d(device, outW, outH, 'rgba16float', R | B, 'fx'),
     };
     for (let i = 0; i < BLOOM_LEVELS; i++) {
       this.dims[i * 2] = Math.max(1, bw >> i);
@@ -129,7 +131,7 @@ export class Post {
       { binding: 4, resource: { buffer: this.taaU } },
     ] }));
     const mv = (tex: GPUTexture, m: number) => tex.createView({ baseMipLevel: m, mipLevelCount: 1 });
-    // downsample: hist[i] -> down0 ; down(k-1) -> down(k)
+    // downsample: hist[i] (+ particles) -> down0 ; down(k-1) -> down(k)
     this.bgDown = [];
     for (let h = 0; h < 2; h++) {
       for (let k = 0; k < BLOOM_LEVELS; k++) {
@@ -138,7 +140,7 @@ export class Post {
         this.bgDown.push(device.createBindGroup({ layout: this.lBloom, entries: [
           { binding: 0, resource: k === 0 ? t.hist[h].createView() : mv(t.bloomDown, k - 1) },
           { binding: 1, resource: mv(t.bloomDown, k) },
-          { binding: 2, resource: mv(t.bloomUp, k) },
+          { binding: 2, resource: k === 0 ? t.fx.createView() : mv(t.bloomUp, k) },
           { binding: 3, resource: { buffer: u } },
         ] }));
       }
@@ -163,6 +165,7 @@ export class Post {
       { binding: 3, resource: { buffer: this.textBuf } },
       { binding: 4, resource: { buffer: this.finalU } },
       { binding: 5, resource: { buffer: this.expoBuf } },
+      { binding: 6, resource: t.fx.createView() },
     ] }));
   }
 

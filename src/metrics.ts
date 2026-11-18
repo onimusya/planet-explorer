@@ -3,7 +3,7 @@
 import { clock, FRAME_MS, CPU_MS } from './clock';
 
 export const RING = 2048;
-export const PASS_NAMES = ['PRE', 'SHD', 'MAIN', 'WATR', 'VOL', 'POST', 'FIN'] as const;
+export const PASS_NAMES = ['PRE', 'SHD', 'MAIN', 'WATR', 'VOL', 'POST', 'FIN', 'FX'] as const;
 export const NPASS = PASS_NAMES.length;
 // Frames of GPU timestamps per readback. Each readback allocates (mapAsync returns a Promise,
 // every mapping a new ArrayBuffer, and reading it needs a view), so frames are read in batches.

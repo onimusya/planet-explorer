@@ -8,7 +8,7 @@ import { clamp } from './math';
 import { PASS_NAMES } from './metrics';
 import { clock, DT, TIME, FRAME_MS, CPU_MS } from './clock';
 import {
-  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L,
+  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L, valleyFraming,
 } from './world';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
@@ -46,14 +46,22 @@ async function main() {
   const D2R = Math.PI / 180;
   const dirAz = (az: number, pitch: number): [number, number, number] => [
     Math.sin(az * D2R) * Math.cos(pitch * D2R), Math.sin(pitch * D2R), -Math.cos(az * D2R) * Math.cos(pitch * D2R)];
+  // B. Bioluminescent Valley at time t: standing in the herd's glowing clearing, looking back at
+  // the herd as it walks its trail, with the mushroom forest behind it (world.ts valleyFraming)
+  const VF = new Float64Array(4);
+  const valleyPose = (t: number) => {
+    valleyFraming(t, VF);
+    const vy = ground(VF[0], VF[1]) + 5;
+    // aim a little over the animals' backs: the herd sits low in the frame, under the canopy and
+    // the kettle that circles behind it
+    setPose(1, VF[0], vy, VF[1], VF[2] - VF[0], ground(VF[2], VF[3]) + 3.5 - vy, VF[3] - VF[1]);
+  };
   {
     // A. Arrival Vista: on the cliff lip; sun just off the left edge, gas giant right of centre over the lake
     const x = VISTA_P[0] + VISTA_DIR[0] * 30, z = VISTA_P[1] + VISTA_DIR[1] * 30;
     setPose(0, x, ground(x, z) + 4.5, z, ...dirAz(18, -4));
-    // B. Bioluminescent Valley: above the floor near the head of the valley, looking down its axis
-    const ax = VALLEY_B[0] - VALLEY_A[0], az = VALLEY_B[1] - VALLEY_A[1];
-    const vx = VALLEY_A[0] + ax * 0.15, vz = VALLEY_A[1] + az * 0.15;
-    setPose(1, vx, ground(vx, vz) + 35, vz, ...dirAz(60, -6));
+    // B. Bioluminescent Valley: see valleyPose()
+    valleyPose(0);
     // C. Monumental Highlands: above a mesa prow on the west rim, looking east-north-east along the canyon
     const hx = HIGHLANDS_C[0] - 1200, hz = HIGHLANDS_C[1] + 250;
     setPose(2, hx, Math.max(600, ground(hx, hz) + 40), hz, ...dirAz(75, -12));
@@ -61,6 +69,8 @@ async function main() {
   }
   const goPose = (i: number, fly: boolean) => {
     const o = i * 6;
+    // the herd walks a fixed rhythm, so frame it where it will be when the camera arrives
+    if (i === 1) valleyPose(clock[TIME] + (fly ? camera.flyDuration(POSES[o], POSES[o + 1], POSES[o + 2]) : 0));
     if (fly) camera.flyTo(POSES[o], POSES[o + 1], POSES[o + 2], POSES[o + 3], POSES[o + 4], POSES[o + 5]);
     else camera.setPose(POSES[o], POSES[o + 1], POSES[o + 2], POSES[o + 3], POSES[o + 4], POSES[o + 5]);
     r.resetHistory = !fly;
@@ -151,48 +161,49 @@ async function main() {
     c = m.put(3, 0, 'GPU ');
     if (m.hasGpu) {
       c = m.num(3, c, S, 6, 2);
-      c = m.put(3, c, ' MS  P99 ');
+      c = m.put(3, c, ' MS   P99 ');
       c = m.num(3, c, S, 9, 2);
-      c = m.put(3, c, '  ');
+      m.put(3, c, ' MS');
+      c = 0;
       for (let p = 0; p < m.passMs.length; p++) {
         if (m.passMs[p] <= 0) continue;
-        c = m.put(3, c, PASS_NAMES[p]);
-        c = m.put(3, c, ' ');
-        c = m.num(3, c, m.passMs, p, 1);
-        c = m.put(3, c, ' ');
+        c = m.put(4, c, PASS_NAMES[p]);
+        c = m.put(4, c, ' ');
+        c = m.num(4, c, m.passMs, p, 1);
+        c = m.put(4, c, ' ');
       }
     } else m.put(3, c, 'N/A (NO TIMESTAMP QUERY)');
-    c = m.put(4, 0, 'RES ');
-    c = m.int(4, c, r.iw);
-    c = m.put(4, c, 'X');
-    c = m.int(4, c, r.ih);
-    c = m.put(4, c, ' (');
+    c = m.put(5, 0, 'RES ');
+    c = m.int(5, c, r.iw);
+    c = m.put(5, c, 'X');
+    c = m.int(5, c, r.ih);
+    c = m.put(5, c, ' (');
     m.v[0] = r.renderScale * 100;
-    c = m.num(4, c, m.v, 0, 0);
-    c = m.put(4, c, '%)  OUT ');
-    c = m.int(4, c, r.t.outW);
-    c = m.put(4, c, 'X');
-    c = m.int(4, c, r.t.outH);
-    c = m.put(4, c, adaptive ? '  ADAPTIVE' : '  FIXED');
-    c = m.put(5, 0, 'QUALITY ');
-    c = m.put(5, c, r.quality >= 2 ? 'HIGH' : r.quality >= 1 ? 'MEDIUM' : 'LOW');
-    c = m.put(5, c, '   NODES ');
-    c = m.int(5, c, r.terrain.nodeCount);
-    c = m.put(5, c, '   ALT ');
-    c = m.num(5, c, camera.pos, 1, 0);
-    c = m.put(5, c, ' M   SPEED ');
+    c = m.num(5, c, m.v, 0, 0);
+    c = m.put(5, c, '%)  OUT ');
+    c = m.int(5, c, r.t.outW);
+    c = m.put(5, c, 'X');
+    c = m.int(5, c, r.t.outH);
+    c = m.put(5, c, adaptive ? '  ADAPTIVE' : '  FIXED');
+    c = m.put(6, 0, 'QUALITY ');
+    c = m.put(6, c, r.quality >= 2 ? 'HIGH' : r.quality >= 1 ? 'MEDIUM' : 'LOW');
+    c = m.put(6, c, '   NODES ');
+    c = m.int(6, c, r.terrain.nodeCount);
+    c = m.put(6, c, '   ALT ');
+    c = m.num(6, c, camera.pos, 1, 0);
+    c = m.put(6, c, ' M   SPEED ');
     m.v[0] = camera.speed;
-    m.num(5, c, m.v, 0, 0);
-    if (bench.running) m.put(6, 0, 'BENCHMARK RUNNING...');
+    m.num(6, c, m.v, 0, 0);
+    if (bench.running) m.put(7, 0, 'BENCHMARK RUNNING...');
     else if (benchDone) {
-      c = m.put(6, 0, 'BENCH  AVG ');
-      c = m.num(6, c, benchSum, 0, 1);
-      c = m.put(6, c, ' FPS  1% LOW ');
-      c = m.num(6, c, benchSum, 1, 1);
-      c = m.put(6, c, '  P99 ');
-      c = m.num(6, c, benchSum, 4, 2);
-      c = m.put(6, c, ' MS  GPU ');
-      m.num(6, c, benchSum, 6, 2);
+      c = m.put(7, 0, 'BENCH  AVG ');
+      c = m.num(7, c, benchSum, 0, 1);
+      c = m.put(7, c, ' FPS  1% LOW ');
+      c = m.num(7, c, benchSum, 1, 1);
+      c = m.put(7, c, '  P99 ');
+      c = m.num(7, c, benchSum, 4, 2);
+      c = m.put(7, c, ' MS  GPU ');
+      m.num(7, c, benchSum, 6, 2);
     }
     ctx.device.queue.writeBuffer(r.post.textBuf, 0, m.text);
   };
@@ -271,6 +282,8 @@ async function main() {
     cam: () => [camera.pos[0], camera.pos[1], camera.pos[2], camera.fwd[0], camera.fwd[1], camera.fwd[2]],
     vegCounts: () => r.veg.debugCounts(),
     vegStats: () => r.veg.stats,
+    fauna: () => r.fauna.debugPoses(),
+    faunaStats: () => r.fauna.stats,
     volDebug: (m: number) => { r.vol.debug = m; },
     passMs: () => Array.from(r.metrics.passMs),
     frames: () => r.frame,

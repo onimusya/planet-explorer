@@ -468,6 +468,17 @@ export function genFlower(seed: number, variant: number, lod: number): MeshBuild
   return mb;
 }
 
+// Smooth egg-shaped lathe profile [r, y] of n points from the bottom pole to the top pole: waist
+// radius rr, bottom at -1.2 rr, top at +1.3 rr, fullest just below the middle.
+function egg(rr: number, n: number): [number, number][] {
+  const p: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const a = (Math.PI * i) / (n - 1), c = Math.cos(a);
+    p.push([i === n - 1 ? 0 : rr * Math.sin(a) * (1 + 0.1 * c), rr * (0.05 - 1.25 * c)]);
+  }
+  return p;
+}
+
 export function genGlowpod(seed: number, variant: number, lod: number): MeshBuilder {
   const r = rng(seed * 6007 + variant * 31);
   const mb = new MeshBuilder();
@@ -481,7 +492,8 @@ export function genGlowpod(seed: number, variant: number, lod: number): MeshBuil
     mb.tube(p, p.map((_, k) => 0.03 * (1 - 0.5 * k / p.length) + 0.012), lod === 0 ? 5 : 3, PART.STEM, (t) => t, () => 0.8);
     const e = p[p.length - 1];
     const rr = 0.07 + r() * 0.08;
-    mb.lathe([[0, -rr * 1.2], [rr * 0.8, -rr * 0.6], [rr, rr * 0.3], [rr * 0.5, rr * 1.1], [0, rr * 1.3]], lod === 0 ? 8 : 5, e, PART.BULB, () => 1, () => 1);
+    // glowpods crowd the valley floor right up to the camera, so their bulbs get a smooth outline
+    mb.lathe(egg(rr, lod === 0 ? 7 : 5), lod === 0 ? 12 : 6, e, PART.BULB, () => 1, () => 1);
   }
   return mb;
 }

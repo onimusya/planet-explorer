@@ -3,7 +3,7 @@ import genSrc from './shaders/terrain_gen.wgsl';
 import terrainSrc from './shaders/terrain.wgsl';
 import { L, bgl, buffer, bufferWith, computePipe, tex2d, U, T } from './gpu';
 import type { Ctx } from './ctx';
-import { HMAP_N, WORLD_L, PLANET_R } from './world';
+import { HMAP_N, WORLD_L, PLANET_R, TRAIL_N } from './world';
 
 const LODS = 11;
 const LEAF = 16;
@@ -20,6 +20,7 @@ export class Terrain {
   gTex!: GPUTexture;
   aTex!: GPUTexture;
   fTex!: GPUTexture; // coarse (1/4 res, mipmapped) height / shadow height / occluder distance
+  tTex!: GPUTexture; // herd trail mask (see genTrail in terrain_gen.wgsl)
   cpuGrid = new Float32Array(CPU_N * CPU_N);
   private pyr: Float32Array[] = []; // min/max pyramid, level 0 = 256 m blocks
   pipeline!: GPURenderPipeline;
@@ -85,8 +86,9 @@ export class Terrain {
       mm: bgl(device, [E.inA, E.minmax]),
       coarse: bgl(device, [E.inA, E.inB, E.outRGBA16]),
       cmip: bgl(device, [E.inB, E.outRGBA16]),
+      trail: bgl(device, [E.outRGBA8]),
     };
-    const [pBase, pFin, pMip, pAttr, pCpu, pMm, pCoarse, pCmip] = await Promise.all([
+    const [pBase, pFin, pMip, pAttr, pCpu, pMm, pCoarse, pCmip, pTrail] = await Promise.all([
       computePipe(device, mod, 'genBase', [fb, lay.base]),
       computePipe(device, mod, 'genFinal', [fb, lay.fin]),
       computePipe(device, mod, 'genMaxMip', [fb, lay.mip]),
@@ -95,6 +97,7 @@ export class Terrain {
       computePipe(device, mod, 'genMinMax', [fb, lay.mm]),
       computePipe(device, mod, 'genCoarse', [fb, lay.coarse]),
       computePipe(device, mod, 'genCoarseMip', [fb, lay.cmip]),
+      computePipe(device, mod, 'genTrail', [fb, lay.trail]),
     ]);
     const v = (t: GPUTexture, mip = 0, count = 1) => t.createView({ baseMipLevel: mip, mipLevelCount: count });
     const mk = (layout: GPUBindGroupLayout, entries: [number, GPUBindingResource][]) =>
@@ -157,6 +160,10 @@ export class Terrain {
         const s = Math.max(1, CN >> m);
         pass.dispatchWorkgroups(Math.ceil(s / 8), Math.ceil(s / 8));
       }
+      this.tTex = tex2d(device, TRAIL_N, TRAIL_N, 'rgba8unorm', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'trail');
+      pass.setPipeline(pTrail);
+      pass.setBindGroup(1, mk(lay.trail, [[2, v(this.tTex)]]));
+      pass.dispatchWorkgroups(Math.ceil(TRAIL_N / 8), Math.ceil(TRAIL_N / 8));
       pass.end();
       device.queue.submit([enc.finish()]);
     }

@@ -41,6 +41,9 @@ fn down(@builtin(global_invocation_id) id: vec3u) {
     let w3 = karis(g3) * 0.125;
     let w4 = karis(g4) * 0.5;
     o = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / (w0 + w1 + w2 + w3 + w4);
+    // airborne particles (their own layer, see fx.wgsl) join the first level
+    o += (textureSampleLevel(addTex, sLinClamp, uv + t * vec2f(-1.0, -1.0), 0.0).rgb + textureSampleLevel(addTex, sLinClamp, uv + t * vec2f(1.0, -1.0), 0.0).rgb
+        + textureSampleLevel(addTex, sLinClamp, uv + t * vec2f(-1.0, 1.0), 0.0).rgb + textureSampleLevel(addTex, sLinClamp, uv + t * vec2f(1.0, 1.0), 0.0).rgb) * 0.25;
   } else {
     o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
   }

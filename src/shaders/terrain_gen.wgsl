@@ -1,6 +1,7 @@
 // One-time terrain field generation (heights, erosion, attributes, AO, sun shadows, min/max).
 //#include "common.wgsl"
 //#include "noise.wgsl"
+//#include "valley.wgsl"
 
 @group(1) @binding(0) var inA: texture_2d<f32>;
 @group(1) @binding(1) var outR32: texture_storage_2d<r32float, write>;
@@ -95,7 +96,7 @@ fn baseHeight(p: vec2f) -> f32 {
   h = mix(h, -22.0 + fbm(q * 64.0, vec2i(64), 2, 0.5) * 10.0 + smoothstep(0.0, 520.0, dl) * 18.0, basin);
 
   // Bioluminescent valley: deep, meandering canyon-valley with high terraced walls
-  let wv = vec2f(fbm(q * 16.0 + vec2f(2.1, 0.0), vec2i(16), 3, 0.5), fbm(q * 16.0 + vec2f(0.0, 4.7), vec2i(16), 3, 0.5)) * 260.0;
+  let wv = valleyWarp(p); // shared with the fauna (valley.wgsl)
   let vs = segInfo(p + wv, VALLEY_A, VALLEY_B);
   let vEnd = smoothstep(0.0, 0.12, vs.y) * (1.0 - smoothstep(0.86, 1.0, vs.y));
   let floorH = 26.0 + fbm(q * 96.0, vec2i(96), 2, 0.5) * 8.0;
@@ -352,4 +353,18 @@ fn genCoarseMip(@builtin(global_invocation_id) id: vec3u) {
     s += textureLoad(inB, min(o + vec2i(k & 1, k >> 1), dims - 1), 0);
   }
   textureStore(outRGBA16, vec2i(id.xy), s * 0.25);
+}
+
+// Herd trail mask over TRAIL_C +- TRAIL_HS: r = keep tall flora off the trail and the meadow it
+// encloses (the herd's grazing clearing), g = trampled ground along the trail.
+@compute @workgroup_size(8, 8)
+fn genTrail(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= TRAIL_N || id.y >= TRAIL_N) { return; }
+  let p = TRAIL_C + ((vec2f(id.xy) + 0.5) / f32(TRAIL_N) - 0.5) * (2.0 * TRAIL_HS);
+  let sd = trailSD(valleyUV(p));
+  let d = abs(sd);
+  let n = fbm(p / 32.0, vec2i(512), 2, 0.5);
+  let clear = 1.0 - smoothstep(5.2 + n * 1.5, 8.2 + n * 2.0, sd);
+  let wear = 1.0 - smoothstep(3.0 + n, 4.6 + n, d);
+  textureStore(outRGBA8, vec2i(id.xy), vec4f(clear, wear, 0.0, 1.0));
 }

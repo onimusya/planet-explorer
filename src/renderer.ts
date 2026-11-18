@@ -9,6 +9,8 @@ import { Vegetation } from './vegetation';
 import { buildMarks } from './landmarks';
 import { Grass } from './grass';
 import { Volume } from './volume';
+import { Fauna } from './fauna';
+import { Fx } from './fx';
 import { Camera } from './camera';
 import { FO } from './frame';
 import { tex2d, T } from './gpu';
@@ -29,6 +31,8 @@ export class Renderer {
   veg: Vegetation;
   grass: Grass;
   vol: Volume;
+  fauna: Fauna;
+  fx: Fx;
   private prevIW = 1;
   private prevIH = 1;
   private volDesc: GPUComputePassDescriptor = {};
@@ -98,6 +102,8 @@ export class Renderer {
     this.veg = new Vegetation(ctx);
     this.grass = new Grass(ctx);
     this.vol = new Volume(ctx);
+    this.fauna = new Fauna(ctx);
+    this.fx = new Fx(ctx);
     this.waterColorAtt = { view: undefined as unknown as GPUTextureView, loadOp: 'load', storeOp: 'store' };
     this.waterDepthAtt = { view: undefined as unknown as GPUTextureView, depthLoadOp: 'load', depthStoreOp: 'store' };
     this.waterDesc = { colorAttachments: [this.waterColorAtt], depthStencilAttachment: this.waterDepthAtt };
@@ -128,6 +134,9 @@ export class Renderer {
     progress(0.95, 'Growing flora');
     await this.veg.init(buildMarks((x, z) => this.terrain.heightAt(x, z)));
     await this.grass.init();
+    progress(0.97, 'Waking the wildlife');
+    await this.fauna.init();
+    await this.fx.init();
     this.shadowTex = tex2d(device, SHADOW_SIZE, SHADOW_SIZE, 'depth32float', T.RENDER_ATTACHMENT | T.TEXTURE_BINDING, 'shadow', 1, CASCADES);
     // clear shadow layers once (until casters exist)
     {
@@ -151,6 +160,7 @@ export class Renderer {
       { binding: 7, resource: this.atmo.noise.createView() },
       { binding: 8, resource: this.atmo.weather.createView() },
       { binding: 9, resource: this.terrain.fTex.createView() },
+      { binding: 10, resource: this.terrain.tTex.createView() },
     ] });
     this.lightBG = device.createBindGroup({ layout: this.ctx.lightBGL, entries: [
       { binding: 0, resource: this.shadowTex.createView({ dimension: '2d-array' }) },
@@ -172,6 +182,7 @@ export class Renderer {
     be.setBindGroup(2, this.lightBG);
     this.terrain.recordDraw(be);
     this.veg.recordMain(be);
+    this.fauna.recordMain(be);
     this.grass.record(be);
     this.mainBundle = be.finish();
     this.bundles = [this.mainBundle];
@@ -179,6 +190,7 @@ export class Renderer {
     for (let c = 0; c < CASCADES; c++) {
       const sb = device.createRenderBundleEncoder({ colorFormats: [], depthStencilFormat: 'depth32float' });
       this.veg.recordShadow(sb, c);
+      this.fauna.recordShadow(sb, c);
       this.shadowBundles.push([sb.finish()]);
     }
   }
@@ -189,13 +201,14 @@ export class Renderer {
     const s = Math.min(1, Math.sqrt(maxPix / (outW * outH)));
     const fw = Math.max(16, Math.round(outW * s)), fh = Math.max(16, Math.round(outH * s));
     if (this.t) {
-      for (const k of ['color', 'depth', 'lit', 'colorCopy', 'depthCopy', 'fog', 'volDepth', 'bloomDown', 'bloomUp'] as const) this.t[k].destroy();
+      for (const k of ['color', 'depth', 'lit', 'colorCopy', 'depthCopy', 'fog', 'volDepth', 'bloomDown', 'bloomUp', 'fx'] as const) this.t[k].destroy();
       this.t.hist[0].destroy(); this.t.hist[1].destroy();
       this.t.cloud[0].destroy(); this.t.cloud[1].destroy();
     }
     this.t = this.post.createTargets(fw, fh, outW, outH);
     this.post.bindTargets(this.t);
     this.vol.bind(this.t);
+    this.fx.bind(this.t, this.worldBG);
     this.mainColorAtt.view = this.t.color.createView();
     this.mainDepthAtt.view = this.t.depth.createView();
     this.waterColorAtt.view = this.mainColorAtt.view;
@@ -332,6 +345,7 @@ export class Renderer {
     this.atmo.encodeFrame(cp);
     this.veg.encodeCull(cp, this.worldBG);
     this.grass.encodeCull(cp, this.worldBG);
+    this.fauna.encodeUpdate(cp, this.worldBG);
     cp.end();
     // 1b. shadow cascades
     for (let c = 0; c < CASCADES; c++) {
@@ -357,6 +371,8 @@ export class Renderer {
     wp.setScissorRect(0, 0, iw, ih);
     wp.executeBundles(this.waterBundles);
     wp.end();
+    // 2c. airborne particles into their own layer (needs the final scene depth)
+    this.fx.encode(enc, m.ts(7));
     // 3. volumetric clouds + fog (half resolution)
     const ci = this.frame & 1;
     this.volDesc.timestampWrites = m.ts(4);

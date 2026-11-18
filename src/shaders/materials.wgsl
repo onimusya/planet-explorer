@@ -78,7 +78,8 @@ fn meadowCover(p: vec2f, a: vec4f, slope: f32, h: f32) -> f32 {
   let n = fbm(p / 32.0, vec2i(512), 2, 0.5);
   let lush = a.y + n * 0.35 + 0.22 + valleyMask(p) * 0.3 + highlandMask(p) * 0.15;
   let steep = mix(1.0 - smoothstep(0.42, 0.62, slope + a.w * 0.3), 1.0, ledgeGrass(p));
-  return smoothstep(0.25, 0.5, lush) * steep * (1.0 - smoothstep(1100.0, 1250.0, h));
+  // thinned along the herd's trail
+  return smoothstep(0.25, 0.5, lush) * steep * (1.0 - smoothstep(1100.0, 1250.0, h)) * (1.0 - 0.45 * trailMask(p).y);
 }
 // Travelling wind-gust brightness waves over meadows (shared by blades and the far canopy).
 fn meadowWave(p: vec2f) -> f32 {
