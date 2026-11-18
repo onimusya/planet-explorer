@@ -27,9 +27,9 @@ export class Input {
         case 'ShiftLeft': case 'ShiftRight': this.keys[K.SHIFT] = v; break;
         case 'AltLeft': case 'AltRight': this.keys[K.ALT] = v; break;
         case 'KeyR': if (down) this.actions[0] = 1; break;
-        case 'Digit1': if (down) this.actions[1] = 1; break;
-        case 'Digit2': if (down) this.actions[2] = 1; break;
-        case 'Digit3': if (down) this.actions[3] = 1; break;
+        case 'Digit1': case 'Numpad1': if (down) this.actions[1] = 1; break;
+        case 'Digit2': case 'Numpad2': if (down) this.actions[2] = 1; break;
+        case 'Digit3': case 'Numpad3': if (down) this.actions[3] = 1; break;
         case 'KeyM': if (down) this.actions[4] = 1; break;
         case 'KeyH': if (down) this.actions[5] = 1; break;
         case 'KeyB': if (down) this.actions[6] = 1; break;

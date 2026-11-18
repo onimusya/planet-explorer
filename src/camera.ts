@@ -12,6 +12,7 @@ export interface GroundQuery { readonly q: Float64Array; heightQ(): void }
 
 const TMPQ = q4();
 const TMPV = v3();
+const STEER_PX = 24; // mouse travel that takes over from a flight
 
 export class Camera {
   readonly pos = v3();
@@ -37,6 +38,7 @@ export class Camera {
   private readonly fromQ = q4();
   private readonly toQ = q4();
   private arc = 0;
+  private steer = 0; // mouse travel (px) since the current flight or path started
   // scripted path (benchmark): flat arrays of keyframes
   private path: Float64Array | null = null;
   private pathT = 0;
@@ -68,6 +70,8 @@ export class Camera {
     this.arc = Math.min(dist * 0.12, 900);
     this.flyT = 0;
     this.flying = true;
+    this.steer = 0;
+    this.pending.fill(0);
     this.vel.fill(0);
   }
 
@@ -83,6 +87,8 @@ export class Camera {
     this.pathDur = segDur;
     this.pathT = 0;
     this.flying = false;
+    this.steer = 0;
+    this.pending.fill(0);
     this.vel.fill(0);
   }
   get busy() { return this.flying || this.path !== null; }
@@ -119,11 +125,22 @@ export class Camera {
       m[2] = 0;
     }
     const sens = 0.0021;
+    if (this.flying || this.path) {
+      // A destination flight or the benchmark path is handed back to the user only by a movement
+      // key or a deliberate look (STEER_PX of mouse travel since it started). Smaller mouse jitter
+      // is dropped, so it neither cancels the flight nor turns the camera when the flight ends.
+      const keys = input.keys;
+      this.steer += Math.abs(m[0]) + Math.abs(m[1]);
+      if (keys[K.W] || keys[K.S] || keys[K.A] || keys[K.D] || keys[K.UP] || keys[K.DOWN] || keys[K.Q] || keys[K.E] || this.steer > STEER_PX) {
+        this.flying = false;
+        this.path = null;
+      } else {
+        m[0] = 0; m[1] = 0;
+      }
+    }
     this.pending[0] += -m[1] * sens; // pitch
     this.pending[1] += -m[0] * sens; // yaw
     m[0] = 0; m[1] = 0;
-    const userActive = this.pending[0] !== 0 || this.pending[1] !== 0 || input.keys[K.W] || input.keys[K.S] || input.keys[K.A] || input.keys[K.D] || input.keys[K.UP] || input.keys[K.DOWN] || input.keys[K.Q] || input.keys[K.E];
-    if (userActive && (this.flying || this.path)) { this.flying = false; this.path = null; }
 
     if (this.path) { this.stepPath(); this.updateBasis(); return; }
     if (this.flying) { this.stepFly(); this.updateBasis(); return; }
@@ -135,6 +152,9 @@ export class Camera {
     rot[1] = this.pending[1] * f;
     this.pending[0] -= rot[0];
     this.pending[1] -= rot[1];
+    // end the exponential tail exactly (it would otherwise linger in denormals for a long time)
+    if (Math.abs(this.pending[0]) < 1e-9) this.pending[0] = 0;
+    if (Math.abs(this.pending[1]) < 1e-9) this.pending[1] = 0;
     const rollIn = (input.keys[K.Q] ? 1 : 0) - (input.keys[K.E] ? 1 : 0);
     this.rollVel += (rollIn * 1.4 - this.rollVel) * (1 - Math.exp(-dt * 6));
     rot[2] = this.rollVel * dt;
