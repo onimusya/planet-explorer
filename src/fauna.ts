@@ -1,20 +1,47 @@
-// Fauna: a grazing herd on the Bioluminescent Valley floor and flocks of flyers circling the three
-// destinations. Meshes are generated once in a rest pose, with one bone and a blend weight per
-// vertex. Each frame a compute pass (shaders/fauna.wgsl) writes every animal's pose from the time
-// alone, and the vertex shaders in veg.wgsl pose the meshes: legs by two-bone IK with planted feet,
+// Fauna: a grazing herd on the Bioluminescent Valley floor, flocks of flyers circling the three
+// destinations, long-necked titans and stone colossi on the Highlands mesa, travellers in
+// exosuits, sky jellies over the herd, sky rays over the Vista's plain and starships passing over
+// every destination. Meshes are generated once in a rest pose, with one bone and a blend weight per
+// vertex. Each frame a compute pass (shaders/fauna.wgsl) writes every pose from the time alone,
+// and the vertex shaders in veg.wgsl pose the meshes: legs by two-bone IK with planted feet,
 // necks and tails by rotations that grow along their length, wings by shoulder and elbow flaps.
-// The animals share the vegetation's fragment shading, so they sit in the same light and shadow.
+// They share the vegetation's fragment shading, so they sit in the same light and shadow.
+// The ships' engine trails are drawn by fx.ts.
 import faunaSrc from './shaders/fauna.wgsl';
 import vegSrc from './shaders/veg.wgsl';
 import type { Ctx } from './ctx';
 import { L, bgl, buffer, bufferWith, computePipe, U } from './gpu';
 import { MeshBuilder, STRIDE } from './plants';
-import { FAUNA_NC, FAUNA_NB } from './world';
+import {
+  FAUNA_NC, FAUNA_NB, FAUNA_NT, FAUNA_NH, FAUNA_NK, FAUNA_NJ, FAUNA_NR, FAUNA_NS,
+  FAUNA_OT, FAUNA_OH, FAUNA_OK, FAUNA_OJ, FAUNA_OR, FAUNA_OS, FAUNA_N, HERD_TAB_NS, HERD_TAB_NL,
+} from './world';
 
 type V3 = [number, number, number];
-const PART = { SKIN: 10, FIN: 11, EYE: 12, HORN: 13, FEATHER: 14, WING: 15 } as const;
+const PART = {
+  SKIN: 10, FIN: 11, EYE: 12, HORN: 13, FEATHER: 14, WING: 15, HULL: 16, GLASS: 17, ENGINE: 18,
+  SUIT: 19, VISOR: 20, JET: 21, STONE: 22, BELL: 23, TENT: 24, RAY: 25,
+} as const;
 const POSE_VEC4 = 5; // per animal, see fauna.wgsl
-const RIG_VEC4 = 28; // see poseCreature / birdV in veg.wgsl
+const RIG_VEC4 = 96; // grazer 0-16, bird 20-24, titan 32-48, traveller 52-62, colossus 64-74 (veg.wgsl)
+const SHIP_FIGHTERS = 6; // ships.wgsl: ships 0-5 are fighters, 6-8 haulers
+// Per mesh (grazer, bird, titan, traveller, colossus, jelly, ray, fighter, hauler): instance count,
+// first instance (= first pose slot, except the birds whose vertex shader offsets past the herd),
+// and the vertex shader entry points for the main pass and the shadow cascades (null: no shadow).
+const DRAWS: [number, number, string, string | null][] = [
+  [FAUNA_NC, 0, 'vsCreature', 'vsCreatureShadow'],
+  [FAUNA_NB, 0, 'vsBird', 'vsBirdShadow'],
+  [FAUNA_NT, FAUNA_OT, 'vsTitan', 'vsTitanShadow'],
+  [FAUNA_NH, FAUNA_OH, 'vsTraveller', 'vsTravellerShadow'],
+  [FAUNA_NK, FAUNA_OK, 'vsColossus', 'vsColossusShadow'],
+  [FAUNA_NJ, FAUNA_OJ, 'vsJelly', null],
+  [FAUNA_NR, FAUNA_OR, 'vsRay', 'vsRayShadow'],
+  [SHIP_FIGHTERS, FAUNA_OS, 'vsShip', null],
+  [FAUNA_NS - SHIP_FIGHTERS, FAUNA_OS + SHIP_FIGHTERS, 'vsShip', null],
+];
+// Pose update (fauna.wgsl main): one 64-thread workgroup per group (herd, birds, titans,
+// travellers, colossi, jellies, rays, ships).
+const UPDATE_GROUPS = 8;
 
 const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -39,7 +66,9 @@ function spline(rows: number[][], t: number): number[] {
     + (3 * r1[k] - r0[k] - 3 * r2[k] + r3[k]) * u * u * u));
 }
 
-interface Section { c: V3; rx: number; ry: number; lo?: number; up?: V3 }
+// Lofted cross-section: centre, half width (rx) and height (ry), lo scales the lower half, up
+// orients it, and n is the superellipse exponent (2 = ellipse; larger is boxier).
+interface Section { c: V3; rx: number; ry: number; lo?: number; up?: V3; n?: number }
 
 // Mesh builder for rigged meshes: bone index and blend weight ride in the flex and grad slots.
 class Rigged {
@@ -72,12 +101,16 @@ class Rigged {
       const { s, a, b, T, R, U: Uv, ds } = frame(t);
       const drx = (b.rx - a.rx) / ds, dry = (b.ry - a.ry) / ds;
       const [bn, bw] = bone(t);
+      const ex = s.n ?? 2;
       for (let j = 0; j <= sides; j++) {
         const ang = (j / sides) * Math.PI * 2;
         const ca = Math.cos(ang), sa = Math.sin(ang);
+        // superellipse point and its normal (the gradient of |x/rx|^n + |y/ry|^n)
+        const cx = Math.sign(ca) * Math.pow(Math.abs(ca), 2 / ex), sy = Math.sign(sa) * Math.pow(Math.abs(sa), 2 / ex);
         const ry = s.ry * (sa < 0 ? s.lo ?? 1 : 1);
-        const pos = add(s.c, add(mul(R, ca * s.rx), mul(Uv, sa * ry)));
-        const radial = norm(add(mul(R, ca * ry), mul(Uv, sa * s.rx)));
+        const pos = add(s.c, add(mul(R, cx * s.rx), mul(Uv, sy * ry)));
+        const gx = Math.sign(ca) * Math.pow(Math.abs(cx), ex - 1) / s.rx, gy = Math.sign(sa) * Math.pow(Math.abs(sy), ex - 1) / ry;
+        const radial = norm(add(mul(R, gx), mul(Uv, gy)));
         const n = norm(sub(radial, mul(T, ca * ca * drx + sa * sa * dry)));
         this.vert(pos, n, j / sides, t, part, bn, bw, ao(t, sa));
       }
@@ -299,6 +332,316 @@ function genBird(rig: Float32Array): Rigged {
   return r;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Titan: a long-necked giant grazing the Highlands mesa, at unit scale 1.6 m at the shoulder with
+// its head up to 3.5 m and its tail 3.4 m behind (instances are scaled 6-11x). It uses the herd
+// animal's skeleton and leg rig, with its rig constants at base rb (poseCreature in veg.wgsl).
+function genTitan(rig: Float32Array, rb: number): Rigged {
+  const r = new Rigged();
+  const set = (i: number, a: number, b: number, c: number, d: number) => rig.set([a, b, c, d], (rb + i) * 4);
+  const body = [ // z, centre y, half width, half height
+    [-1.12, 1.46, 0.06, 0.06],
+    [-1.02, 1.48, 0.27, 0.27],
+    [-0.82, 1.5, 0.43, 0.44],
+    [-0.48, 1.5, 0.51, 0.52],
+    [-0.08, 1.49, 0.53, 0.54],
+    [0.3, 1.53, 0.5, 0.53],
+    [0.62, 1.62, 0.42, 0.46],
+    [0.86, 1.73, 0.3, 0.33],
+    [1.0, 1.8, 0.17, 0.19],
+    [1.06, 1.82, 0.05, 0.05],
+  ];
+  const bodyAt = (t: number): Section => { const [z, cy, rx, ry] = spline(body, t); return { c: [0, cy, z], rx, ry, lo: 1.1 }; };
+  r.loft(30, 28, bodyAt, PART.SKIN, () => [0, 1], (_t, s) => 0.6 + 0.4 * (0.5 + 0.5 * s));
+  // neck rising high in front, its bend growing toward the head
+  const n0: V3 = [0, 1.74, 0.82], n1: V3 = [0, 2.45, 1.22], n2: V3 = [0, 3.12, 1.5], n3: V3 = [0, 3.45, 1.88];
+  const neckR = (t: number) => lerp(0.3, 0.1, Math.pow(t, 0.8));
+  r.loft(18, 20, (t) => ({ c: bez(n0, n1, n2, n3, t), rx: neckR(t), ry: neckR(t) * 1.06 }),
+    PART.SKIN, (t) => [1, t], (_t, s) => 0.7 + 0.3 * (0.5 + 0.5 * s));
+  set(8, n0[0], n0[1], n0[2], 0);
+  // small head pointing forward and down, eyes, swept crest horns
+  const hb = n3, hd = norm([0, -0.35, 1]);
+  const head = [[-0.05, 0.095, 0.105], [0.05, 0.12, 0.125], [0.18, 0.11, 0.1], [0.3, 0.08, 0.07], [0.37, 0.04, 0.04]];
+  r.loft(12, 16, (t) => { const [s, rx, ry] = spline(head, t); return { c: add(hb, mul(hd, s)), rx, ry }; }, PART.SKIN, () => [2, 1], () => 0.85);
+  set(9, hb[0], hb[1], hb[2], 0);
+  for (const sx of [-1, 1]) {
+    r.ellipsoid(add(add(hb, mul(hd, 0.14)), [sx * 0.1, 0.05, 0]), [0.035, 0.035, 0.035], [sx, 0, 0], 5, 8, PART.EYE, 2, 1, 1);
+    const c0 = add(add(hb, mul(hd, 0.02)), [sx * 0.06, 0.1, 0]);
+    r.blade(add(c0, [0, 0, 0.05]), add(c0, [0, 0, -0.05]), add(c0, [sx * 0.08, 0.16, -0.22]), [1, 0, 0], PART.FIN, 2, 1);
+  }
+  // luminous plates along the neck and the spine
+  for (let k = 0; k < 6; k++) {
+    const t = 0.1 + k * 0.15;
+    const c = bez(n0, n1, n2, n3, t);
+    const T = norm(sub(bez(n0, n1, n2, n3, t + 0.01), bez(n0, n1, n2, n3, t - 0.01)));
+    const N = norm([0, T[2], -T[1]]);
+    const base = add(c, mul(N, neckR(t) - 0.03));
+    r.blade(add(base, mul(T, 0.09)), sub(base, mul(T, 0.09)), add(add(base, mul(N, lerp(0.2, 0.08, t))), mul(T, -0.08)), [1, 0, 0], PART.FIN, 1, t);
+  }
+  const topAt = (z: number) => {
+    let best = bodyAt(0), bd = 1e9;
+    for (let i = 0; i <= 200; i++) { const s = bodyAt(i / 200); const d = Math.abs(s.c[2] - z); if (d < bd) { bd = d; best = s; } }
+    return best.c[1] + best.ry;
+  };
+  for (let k = 0; k < 9; k++) {
+    const z = -0.9 + k * 0.21;
+    const y = topAt(z) - 0.04;
+    const h = 0.16 + 0.22 * Math.sin((Math.PI * (k + 0.5)) / 9);
+    r.blade([0, y, z + 0.1], [0, y, z - 0.1], [0, y + h, z - 0.14], [1, 0, 0], PART.FIN, 0, 1);
+  }
+  // long whip tail
+  const t0: V3 = [0, 1.5, -1.05], t1: V3 = [0, 1.36, -1.8], t2: V3 = [0, 1.18, -2.6], t3: V3 = [0, 1.02, -3.4];
+  r.loft(20, 14, (t) => ({ c: bez(t0, t1, t2, t3, t), rx: lerp(0.3, 0.025, Math.pow(t, 0.7)), ry: lerp(0.32, 0.03, Math.pow(t, 0.7)) }),
+    PART.SKIN, (t) => [3, t], () => 0.8);
+  set(10, t0[0], t0[1], t0[2], 0);
+  // columnar legs: LF, RF, LH, RH
+  const legs = [
+    { hip: [-0.3, 1.3, 0.55] as V3, aU: 0.08, aL: -0.06, bend: 1 },
+    { hip: [0.3, 1.3, 0.55] as V3, aU: 0.08, aL: -0.06, bend: 1 },
+    { hip: [-0.32, 1.3, -0.72] as V3, aU: -0.12, aL: 0.1, bend: -1 },
+    { hip: [0.32, 1.3, -0.72] as V3, aU: -0.12, aL: 0.1, bend: -1 },
+  ];
+  const l1 = 0.62, l2 = 0.66;
+  legs.forEach((g, i) => {
+    const hip = g.hip;
+    const knee: V3 = [hip[0], hip[1] - l1 * Math.cos(g.aU), hip[2] + l1 * Math.sin(g.aU)];
+    const foot: V3 = [hip[0], knee[1] - l2 * Math.cos(g.aL), knee[2] + l2 * Math.sin(g.aL)];
+    const root = add(hip, [0, 0.2, 0]);
+    r.loft(10, 16, (t) => ({ c: lerp3(root, knee, t), rx: lerp(0.24, 0.16, smooth(0, 1, t)), ry: lerp(0.26, 0.17, t), up: [0, 0, 1] }),
+      PART.SKIN, (t) => [4 + i, smooth(0.05, 0.35, t)], (t) => lerp(0.62, 0.82, t));
+    r.ellipsoid(knee, [0.16, 0.16, 0.16], [0, -1, 0], 5, 12, PART.SKIN, 4 + i, 1, 0.8);
+    r.loft(10, 14, (t) => ({ c: lerp3(knee, foot, t), rx: lerp(0.15, 0.135, t), ry: lerp(0.15, 0.135, t), up: [0, 0, 1] }),
+      PART.SKIN, (t) => [8 + i, smooth(0, 0.3, t)], () => 0.7);
+    r.ellipsoid(add(foot, [0, 0.045, 0.02]), [0.17, 0.07, 0.19], [0, 0, 1], 6, 14, PART.HORN, 8 + i, 1, 0.6);
+    set(i, hip[0], hip[1], hip[2], l1);
+    set(4 + i, knee[0], knee[1], knee[2], l2);
+    rig[(rb + 12) * 4 + i] = g.aU;
+    rig[(rb + 13) * 4 + i] = g.aL;
+    rig[(rb + 14) * 4 + i] = g.bend;
+    rig[(rb + 15) * 4 + i] = foot[2];
+    rig[(rb + 16) * 4 + i] = foot[1];
+  });
+  // gait: stance excursion = duty x stride (TITAN_STRIDE in fauna.wgsl), foot lift, duty factor
+  set(11, 0.68 * 1.4, 0.07, 0.68, 0);
+  return r;
+}
+
+// Humanoid standing on y = 0 and facing +z, at rig base rb (bipedV in veg.wgsl): a traveller in an
+// exosuit ('suit': 1.9 m with the helmet antenna, glowing visor, backpack with jet nozzles) or a
+// colossus of basalt and crystal ('stone': hunched, long arms, burning eyes; instances ~15x).
+function genBiped(rig: Float32Array, rb: number, kind: 'suit' | 'stone'): Rigged {
+  const r = new Rigged();
+  const set = (i: number, v: V3) => rig.set([v[0], v[1], v[2], 0], (rb + i) * 4);
+  const suit = kind === 'suit';
+  const S = suit ? PART.SUIT : PART.STONE;
+  const P = suit
+    ? { hipY: 0.94, hipX: 0.095, knee: [0.1, 0.51, 0.012], ankle: [0.1, 0.085, -0.01], sh: [0.205, 1.415, -0.005],
+      el: [0.24, 1.13, -0.02], wr: [0.255, 0.87, 0.015], neck: [0, 1.52, 0] as V3,
+      thigh: [0.088, 0.066], shin: [0.064, 0.05], upper: [0.06, 0.05], fore: [0.05, 0.042] }
+    : { hipY: 0.86, hipX: 0.14, knee: [0.155, 0.47, 0.035], ankle: [0.165, 0.08, 0.0], sh: [0.33, 1.4, 0.08],
+      el: [0.39, 1.02, 0.1], wr: [0.41, 0.64, 0.15], neck: [0, 1.47, 0.12] as V3,
+      thigh: [0.13, 0.1], shin: [0.11, 0.09], upper: [0.1, 0.085], fore: [0.09, 0.08] };
+  // torso lofted up the spine: y, half width, half depth, z offset, superellipse n
+  const torso = suit
+    ? [[0.86, 0.15, 0.105, 0, 2.4], [0.95, 0.168, 0.112, 0, 2.4], [1.06, 0.15, 0.1, 0.006, 2.2], [1.2, 0.178, 0.118, 0.012, 2.6],
+      [1.33, 0.205, 0.13, 0.006, 3], [1.43, 0.195, 0.118, -0.004, 3], [1.49, 0.09, 0.075, 0, 2.2]]
+    : [[0.78, 0.21, 0.15, 0, 2.2], [0.9, 0.24, 0.17, 0.01, 2.4], [1.04, 0.23, 0.17, 0.04, 2.3], [1.2, 0.3, 0.21, 0.08, 2.6],
+      [1.34, 0.36, 0.23, 0.1, 2.8], [1.44, 0.33, 0.2, 0.1, 2.8], [1.5, 0.14, 0.12, 0.12, 2.2]];
+  r.loft(16, 24, (t) => { const [y, rx, ry, z, n] = spline(torso, t); return { c: [0, y, z], rx, ry, n, up: [0, 0, 1] }; },
+    S, () => [30, 1], (t, s) => 0.7 + 0.3 * t * (0.5 + 0.5 * s));
+  const nk = P.neck;
+  r.loft(6, 14, (t) => ({ c: lerp3(add(nk, [0, -0.05, 0]), add(nk, [0, 0.07, 0.01]), t), rx: suit ? 0.056 : 0.1, ry: suit ? 0.052 : 0.09, up: [0, 0, 1] }),
+    S, (t) => [31, t], () => 0.7);
+  set(0, nk);
+  if (suit) {
+    r.ellipsoid([0, 1.67, 0.012], [0.128, 0.15, 0.142], [0, 0, 1], 12, 20, PART.SUIT, 31, 1, 1);
+    r.ellipsoid([0, 1.675, 0.078], [0.098, 0.062, 0.088], [0, 0, 1], 8, 18, PART.VISOR, 31, 1, 1);
+    r.loft(5, 5, (t) => ({ c: lerp3([-0.105, 1.74, -0.05], [-0.13, 1.9, -0.09], t), rx: lerp(0.009, 0.005, t), ry: lerp(0.009, 0.005, t) }), PART.SUIT, () => [31, 1], () => 1);
+    r.ellipsoid([-0.13, 1.905, -0.09], [0.013, 0.013, 0.013], [0, 1, 0], 4, 6, PART.JET, 31, 1, 1);
+    // backpack, jet nozzles, side tanks
+    r.loft(8, 20, (t) => ({ c: lerp3([0, 1.04, -0.205], [0, 1.45, -0.19], t), rx: 0.155, ry: 0.072, n: 4, up: [0, 0, 1] }), PART.SUIT, () => [30, 1], () => 0.8);
+    for (const sx of [-1, 1]) {
+      r.loft(4, 10, (t) => ({ c: lerp3([sx * 0.075, 1.08, -0.205], [sx * 0.078, 1.0, -0.21], t), rx: lerp(0.032, 0.045, t), ry: lerp(0.032, 0.045, t), up: [0, 0, 1] }),
+        PART.JET, () => [30, 1], () => 0.8);
+      r.loft(6, 10, (t) => ({ c: lerp3([sx * 0.165, 1.1, -0.19], [sx * 0.165, 1.4, -0.19], t), rx: 0.035, ry: 0.035, up: [0, 0, 1] }), PART.SUIT, () => [30, 1], () => 0.8);
+    }
+  } else {
+    // a blunt head jutting forward under a brow ridge, burning eyes, crystal shards on the back
+    r.ellipsoid([0, 1.57, 0.2], [0.11, 0.115, 0.13], [0, 0, 1], 10, 16, PART.STONE, 31, 1, 0.9);
+    r.ellipsoid([0, 1.61, 0.29], [0.035, 0.03, 0.1], [1, 0, 0], 6, 10, PART.STONE, 31, 1, 0.9);
+    for (const sx of [-1, 1]) r.ellipsoid([sx * 0.045, 1.575, 0.315], [0.022, 0.018, 0.018], [0, 0, 1], 5, 8, PART.EYE, 31, 1, 1);
+    const shards = [[0.22, 1.46, -0.05, 0.25, 0.3], [-0.24, 1.48, -0.02, -0.22, 0.34], [0.1, 1.4, -0.16, 0.05, 0.42], [-0.12, 1.32, -0.18, -0.1, 0.3],
+      [0.32, 1.42, 0.06, 0.4, 0.22], [-0.33, 1.43, 0.05, -0.38, 0.26], [0, 1.22, -0.2, 0, 0.28]];
+    for (const [x, y, z, dx, h] of shards) {
+      const b: V3 = [x, y, z], tip = add(b, [dx * h, h, -0.25 * h]);
+      const side = norm(cross(sub(tip, b), [0, 0, 1])), side2 = norm(cross(sub(tip, b), side));
+      r.blade(add(b, mul(side, 0.04)), sub(b, mul(side, 0.04)), tip, side2, PART.FIN, 30, 1);
+      r.blade(add(b, mul(side2, 0.035)), sub(b, mul(side2, 0.035)), tip, side, PART.FIN, 30, 1);
+    }
+  }
+  // arms (s = 0 at -x, 1 at +x): shoulder pad, upper arm, elbow, forearm, hand
+  for (const s of [0, 1]) {
+    const sx = s ? 1 : -1;
+    const sh: V3 = [sx * P.sh[0], P.sh[1], P.sh[2]], el: V3 = [sx * P.el[0], P.el[1], P.el[2]], wr: V3 = [sx * P.wr[0], P.wr[1], P.wr[2]];
+    set(1 + s, sh);
+    set(3 + s, el);
+    r.ellipsoid(add(sh, [sx * 0.01, 0.015, 0]), suit ? [0.082, 0.07, 0.085] : [0.16, 0.14, 0.16], [0, 0, 1], 8, 14, S, 32 + s, 1, 0.9);
+    r.loft(10, 14, (t) => ({ c: lerp3(add(sh, [0, 0.02, 0]), el, t), rx: lerp(P.upper[0], P.upper[1], t), ry: lerp(P.upper[0], P.upper[1], t) * 1.05, up: [0, 0, 1] }),
+      S, (t) => [32 + s, smooth(0, 0.15, t)], () => 0.8);
+    r.ellipsoid(el, [P.fore[0] * 1.05, P.fore[0] * 1.05, P.fore[0] * 1.05], [0, -1, 0], 5, 10, S, 34 + s, 0.5, 0.8);
+    r.loft(10, 14, (t) => ({ c: lerp3(el, wr, t), rx: lerp(P.fore[0], P.fore[1], t), ry: lerp(P.fore[0], P.fore[1], t), up: [0, 0, 1] }),
+      S, (t) => [34 + s, smooth(0, 0.3, t)], () => 0.8);
+    r.ellipsoid(add(wr, [0, suit ? -0.055 : -0.07, 0.008]), suit ? [0.038, 0.058, 0.045] : [0.085, 0.1, 0.09], [0, -1, 0], 6, 10, S, 34 + s, 1, 0.75);
+  }
+  // legs: thigh, knee pad, shin, boot or foot (heel to toe)
+  for (const s of [0, 1]) {
+    const sx = s ? 1 : -1;
+    const hip: V3 = [sx * P.hipX, P.hipY, 0], knee: V3 = [sx * P.knee[0], P.knee[1], P.knee[2]], ankle: V3 = [sx * P.ankle[0], P.ankle[1], P.ankle[2]];
+    set(5 + s, hip);
+    set(7 + s, knee);
+    r.loft(12, 16, (t) => ({ c: lerp3(add(hip, [0, 0.06, 0]), knee, t), rx: lerp(P.thigh[0], P.thigh[1], t), ry: lerp(P.thigh[0], P.thigh[1], t) * 1.05, up: [0, 0, 1] }),
+      S, (t) => [36 + s, smooth(0, 0.25, t)], () => 0.8);
+    r.ellipsoid(add(knee, [0, 0, suit ? 0.03 : 0.04]), suit ? [0.055, 0.06, 0.035] : [0.11, 0.11, 0.09], [0, 0, 1], 6, 12, S, 38 + s, 0.4, 0.85);
+    r.loft(12, 16, (t) => ({ c: lerp3(knee, ankle, t), rx: lerp(P.shin[0], P.shin[1], t), ry: lerp(P.shin[0], P.shin[1], t) * 1.05, up: [0, 0, 1] }),
+      S, (t) => [38 + s, smooth(0, 0.25, t)], () => 0.75);
+    const fy = suit ? 0.06 : 0.075, back = suit ? 0.075 : 0.1, toe = suit ? 0.17 : 0.24;
+    r.loft(10, 16, (t) => ({ c: lerp3([ankle[0], fy, ankle[2] - back], [ankle[0], fy - 0.005, ankle[2] + toe], t), rx: suit ? 0.058 : 0.11, ry: fy, n: 3 }),
+      S, () => [38 + s, 1], () => 0.6);
+  }
+  // gait: hip swing, knee lift, arm swing, elbow rest bend; pelvis height
+  rig.set(suit ? [0.42, 0.75, 0.35, 0.18] : [0.36, 0.6, 0.28, 0.35], (rb + 9) * 4);
+  rig.set([P.hipY, 0, 0, 0], (rb + 10) * 4);
+  return r;
+}
+
+// Sky jelly, bell radius 1: a domed bell with a flared rim, four frilled oral arms and a ring of
+// long fine tentacles. Bone 0 is the bell (w from the apex to the rim), 1 the arms and tentacles
+// (w from root to tip); uv.y runs the same way, for the glow.
+function genJelly(): Rigged {
+  const r = new Rigged();
+  const R = 18, S = 32;
+  const prof = (t: number): [number, number] => {
+    const a = t * 1.5, flare = smooth(0.75, 1, t) * 0.12;
+    return [Math.sin(a) * (1 + 0.06 * t) + flare, Math.cos(a) * 0.9 - flare * 0.8];
+  };
+  const start = r.mb.count;
+  for (let i = 0; i <= R; i++) {
+    const t = i / R;
+    const [rr, y] = prof(t);
+    const [r2, y2] = prof(Math.min(t + 0.01, 1)), [r1, y1] = prof(Math.max(t - 0.01, 0));
+    const dr = r2 - r1, dy = y2 - y1;
+    for (let j = 0; j <= S; j++) {
+      const a = (j / S) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+      r.vert([ca * rr, y, sa * rr], norm([-ca * dy, dr, -sa * dy]), j / S, t, PART.BELL, 0, t, 0.9);
+    }
+  }
+  for (let i = 0; i < R; i++) for (let j = 0; j < S; j++) {
+    const a = start + i * (S + 1) + j, b = a + 1, c = a + S + 1, d = c + 1;
+    r.tri(a, b, c); r.tri(b, d, c);
+  }
+  for (let k = 0; k < 4; k++) {
+    const a = (k / 4) * Math.PI * 2 + 0.4;
+    const dir: V3 = [Math.cos(a), 0, Math.sin(a)];
+    r.loft(16, 6, (t) => ({ c: add(mul(dir, 0.12 + 0.15 * Math.sin(t * 3)), [0.06 * Math.sin(t * 9 + k), 0.25 - 1.7 * t, 0.06 * Math.cos(t * 7 + k)]),
+      rx: lerp(0.13, 0.04, t), ry: 0.025, up: dir }), PART.TENT, (t) => [1, t], () => 0.9);
+  }
+  for (let k = 0; k < 12; k++) {
+    const a = (k / 12) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+    const len = 2.4 + 1.2 * ((k * 7) % 5) / 4;
+    const p0: V3 = [ca * 1.02, 0.05, sa * 1.02];
+    r.loft(14, 5, (t) => ({ c: add(p0, [ca * 0.15 * Math.sin(t * 2.5), -len * t, sa * 0.15 * Math.sin(t * 2.5)]), rx: lerp(0.028, 0.006, t), ry: lerp(0.028, 0.006, t), up: [ca, 0, sa] }),
+      PART.TENT, (t) => [1, t], () => 0.9);
+  }
+  return r;
+}
+
+// Sky ray, span 2 (x = -1..1, nose at +z): one closed surface with a body bulge between wings that
+// thin to their edges, cephalic fins, eyes and a whip tail. Bone 0 body and wings, 1 tail.
+// uv: x = |x| (span), y = chord position (0 trailing edge, 1 leading edge).
+function genRay(): Rigged {
+  const r = new Rigged();
+  const NX = 18, NZ = 10;
+  const le = (ax: number) => 0.52 - 0.68 * Math.pow(ax, 1.15);
+  const te = (ax: number) => -0.42 + 0.24 * Math.pow(ax, 0.9);
+  const th = (ax: number, c: number) => 0.13 * Math.pow(1 - ax, 1.6) * (1 - c * c) + 0.004;
+  for (const top of [true, false]) {
+    const start = r.mb.count;
+    const k = top ? 1 : -0.55;
+    const pos = (i: number, j: number): V3 => {
+      const x = -1 + i / NX, ax = Math.abs(x), c = -1 + (2 * j) / NZ;
+      return [x, k * th(ax, c), lerp(te(ax), le(ax), (c + 1) / 2)];
+    };
+    for (let i = 0; i <= 2 * NX; i++) for (let j = 0; j <= NZ; j++) {
+      const p = pos(i, j);
+      let n = norm(cross(sub(pos(i, Math.min(j + 1, NZ)), pos(i, Math.max(j - 1, 0))), sub(pos(Math.min(i + 1, 2 * NX), j), pos(Math.max(i - 1, 0), j))));
+      if (n[1] > 0 !== top) n = mul(n, -1);
+      r.vert(p, n, Math.abs(p[0]), j / NZ, PART.RAY, 0, Math.abs(p[0]), 0.9);
+    }
+    for (let i = 0; i < 2 * NX; i++) for (let j = 0; j < NZ; j++) {
+      const a = start + i * (NZ + 1) + j, b = a + 1, c = a + NZ + 1, d = c + 1;
+      r.tri(a, b, c); r.tri(b, d, c);
+    }
+  }
+  for (const sx of [-1, 1]) {
+    const b: V3 = [sx * 0.1, 0, 0.5];
+    r.blade(add(b, [sx * 0.03, 0, -0.04]), add(b, [-sx * 0.03, 0, 0]), add(b, [sx * 0.05, -0.04, 0.2]), [0, 1, 0], PART.RAY, 0, 0.1);
+    r.ellipsoid([sx * 0.13, 0.035, 0.4], [0.022, 0.022, 0.022], [sx, 0, 0], 4, 6, PART.EYE, 0, 0.1, 1);
+  }
+  r.loft(14, 6, (t) => ({ c: lerp3([0, 0.01, -0.42], [0, 0.03, -1.55], t), rx: lerp(0.035, 0.004, t), ry: lerp(0.03, 0.004, t) }), PART.RAY, (t) => [1, t], () => 0.85);
+  return r;
+}
+
+// Wing or fin slab lofted from root to tip: chord along the side vector, thickness along up.
+function slab(r: Rigged, root: V3, tip: V3, chord: [number, number], thick: [number, number], part: number, up: V3 = [0, 1, 0]) {
+  r.loft(10, 16, (t) => ({ c: lerp3(root, tip, t), rx: lerp(chord[0], chord[1], t) / 2, ry: lerp(thick[0], thick[1], t) / 2, n: 4, up }),
+    part, () => [0, 1], () => 0.85);
+}
+
+// Fighter, 16 m from the nozzles to the nose (+z): fuselage, canopy, swept wings with tip pods,
+// twin engines with glowing nozzles (ships.wgsl shipEngine), canted tail fins.
+function genFighter(): Rigged {
+  const r = new Rigged();
+  const fus = [ // z, y, half width, half height, superellipse n
+    [-7.6, 0.15, 0.95, 0.55, 3.2], [-7.0, 0.15, 1.25, 0.72, 3.2], [-4.5, 0.2, 1.45, 0.84, 3.2], [-1.5, 0.25, 1.3, 0.82, 3],
+    [1.5, 0.25, 1.0, 0.72, 2.7], [4.2, 0.12, 0.66, 0.52, 2.4], [6.6, -0.02, 0.3, 0.26, 2.2], [8.0, -0.08, 0.05, 0.05, 2],
+  ];
+  r.loft(28, 24, (t) => { const [z, y, rx, ry, n] = spline(fus, t); return { c: [0, y, z], rx, ry, n, lo: 0.85 }; },
+    PART.HULL, () => [0, 1], (_t, s) => 0.75 + 0.25 * (0.5 + 0.5 * s));
+  r.ellipsoid([0, 0.95, 2.2], [0.52, 0.42, 1.75], [0, 0, 1], 10, 18, PART.GLASS, 0, 1, 1);
+  for (const sx of [-1, 1]) {
+    slab(r, [sx * 1.1, 0, -2.0], [sx * 7.0, 0.42, -5.05], [5.6, 1.5], [0.34, 0.08], PART.HULL);
+    r.ellipsoid([sx * 7.05, 0.44, -4.9], [0.13, 0.13, 0.75], [0, 0, 1], 6, 10, PART.HULL, 0, 1, 1);
+    r.loft(12, 18, (t) => {
+      const rr = t < 0.85 ? lerp(0.6, 0.66, t / 0.85) : lerp(0.66, 0.48, (t - 0.85) / 0.15);
+      return { c: [sx * 1.75, -0.05, lerp(-7.9, -2.9, t)], rx: rr, ry: rr };
+    }, PART.HULL, () => [0, 1], () => 0.8);
+    r.ellipsoid([sx * 1.75, -0.05, -7.93], [0.5, 0.5, 0.09], [0, 0, 1], 4, 16, PART.ENGINE, 0, 1, 1);
+    slab(r, [sx * 0.75, 0.7, -5.4], [sx * 1.55, 2.3, -6.9], [2.0, 0.7], [0.12, 0.05], PART.HULL, [sx, 0, 0]);
+  }
+  return r;
+}
+
+// Hauler, 22 m: boxy hull, cockpit band, dorsal fin, two cargo pods on pylons, four engines.
+function genHauler(): Rigged {
+  const r = new Rigged();
+  const fus = [
+    [-10.9, 0.4, 1.9, 1.5, 4.5], [-10.2, 0.4, 2.3, 1.85, 4.5], [-4, 0.45, 2.45, 1.95, 4.5], [3, 0.45, 2.35, 1.9, 4.2],
+    [7.5, 0.35, 2.0, 1.6, 3.6], [10, 0.2, 1.3, 1.1, 3], [11.2, 0.1, 0.4, 0.4, 2.4],
+  ];
+  r.loft(26, 28, (t) => { const [z, y, rx, ry, n] = spline(fus, t); return { c: [0, y, z], rx, ry, n }; },
+    PART.HULL, () => [0, 1], (_t, s) => 0.75 + 0.25 * (0.5 + 0.5 * s));
+  r.ellipsoid([0, 1.2, 8.6], [1.25, 0.5, 1.5], [0, 0, 1], 8, 18, PART.GLASS, 0, 1, 1);
+  slab(r, [0, 2.1, -6.5], [0, 3.7, -9.6], [3.2, 1.2], [0.22, 0.08], PART.HULL, [1, 0, 0]);
+  const pod = [[-8.7, 0.2, 0.9, 1.05, 3], [-8.0, 0.2, 1.15, 1.35, 6], [3.5, 0.2, 1.15, 1.35, 6], [4.6, 0.2, 0.7, 0.8, 3]];
+  for (const sx of [-1, 1]) {
+    r.loft(14, 22, (t) => { const [z, y, rx, ry, n] = spline(pod, t); return { c: [sx * 3.9, y, z], rx, ry, n }; }, PART.HULL, () => [0, 1], () => 0.8);
+    slab(r, [sx * 2.2, 0.35, -2.5], [sx * 3.2, 0.3, -2.5], [6.0, 5.0], [0.5, 0.4], PART.HULL);
+    r.ellipsoid([sx * 3.9, 0.2, -8.82], [0.78, 0.9, 0.1], [0, 0, 1], 4, 16, PART.ENGINE, 0, 1, 1);
+    r.ellipsoid([sx * 1.15, 0.45, -10.95], [0.6, 0.6, 0.1], [0, 0, 1], 4, 14, PART.ENGINE, 0, 1, 1);
+  }
+  return r;
+}
+
 // Pack meshes into one vertex buffer (vegetation layout, 24 bytes) and one index buffer.
 function pack(meshes: MeshBuilder[]) {
   let vcount = 0, icount = 0;
@@ -337,43 +680,20 @@ export class Fauna {
   private pUpdate!: GPUComputePipeline;
   private updateBG!: GPUBindGroup;
   private drawBG: GPUBindGroup[] = [];
-  private pCreature!: GPURenderPipeline;
-  private pBird!: GPURenderPipeline;
-  private pCreatureSh!: GPURenderPipeline;
-  private pBirdSh!: GPURenderPipeline;
+  private pMain: GPURenderPipeline[] = [];
+  private pShadow: (GPURenderPipeline | null)[] = [];
   stats = { vertices: 0, triangles: 0 };
 
   constructor(private ctx: Ctx) {}
 
   async init() {
     const { device } = this.ctx;
-    const rig = new Float32Array(RIG_VEC4 * 4);
-    const packed = pack([genGrazer(rig).mb, genBird(rig).mb]);
-    this.draws = packed.draws;
-    this.stats.vertices = packed.vcount;
-    this.stats.triangles = packed.tris;
-    this.vbuf = bufferWith(device, packed.vb, U.VERTEX, 'faunaVerts');
-    this.ibuf = bufferWith(device, packed.ib, U.INDEX, 'faunaIdx');
-    this.poseBuf = buffer(device, (FAUNA_NC + FAUNA_NB) * POSE_VEC4 * 16, U.STORAGE | U.COPY_SRC, 'faunaPose');
-    const rigBuf = bufferWith(device, rig, U.UNIFORM, 'faunaRig');
     const fb = this.ctx.frameBGL, wb = this.ctx.worldBGL;
-    // compute: poses
-    const lu = bgl(device, [L.storage(0)]);
-    const cmod = await this.ctx.module(faunaSrc, 'fauna');
-    this.pUpdate = await computePipe(device, cmod, 'main', [fb, wb, lu]);
-    this.updateBG = device.createBindGroup({ layout: lu, entries: [{ binding: 0, resource: { buffer: this.poseBuf } }] });
-    // draw: cascade index (shadows), poses, rig
+    // layouts: poses and the herd trail table (compute); cascade index (shadows), poses, rig (draw)
+    const lu = bgl(device, [L.storage(0), L.storage(1)]);
     const V = GPUShaderStage.VERTEX;
     const ld = bgl(device, [L.uniform(0, V | GPUShaderStage.FRAGMENT), L.storageRO(1, V), L.uniform(2, V)]);
-    for (let c = 0; c < 4; c++) {
-      const u = bufferWith(device, new Uint32Array([c, 0, 0, 0]), U.UNIFORM);
-      this.drawBG.push(device.createBindGroup({ layout: ld, entries: [
-        { binding: 0, resource: { buffer: u } },
-        { binding: 1, resource: { buffer: this.poseBuf } },
-        { binding: 2, resource: { buffer: rigBuf } },
-      ] }));
-    }
-    const vmod = await this.ctx.module(vegSrc, 'veg');
+    const [cmod, vmod] = await Promise.all([this.ctx.module(faunaSrc, 'fauna'), this.ctx.module(vegSrc, 'veg')]);
     const vbl: GPUVertexBufferLayout[] = [{ arrayStride: STRIDE, attributes: [
       { shaderLocation: 0, offset: 0, format: 'float32x3' },
       { shaderLocation: 1, offset: 12, format: 'snorm8x4' },
@@ -390,47 +710,103 @@ export class Fauna {
       fragment: { module: vmod, entryPoint: 'fsOpaque', targets: [{ format: 'rgba16float' }] }, primitive: prim, depthStencil: depth });
     const shadow = (label: string, entryPoint: string) => device.createRenderPipelineAsync({ label, layout: shLayout,
       vertex: { module: vmod, entryPoint, buffers: vbl }, primitive: prim, depthStencil: shDepth });
-    [this.pCreature, this.pBird, this.pCreatureSh, this.pBirdSh] = await Promise.all([
-      main('creature', 'vsCreature'), main('bird', 'vsBird'),
-      shadow('creatureShadow', 'vsCreatureShadow'), shadow('birdShadow', 'vsBirdShadow'),
+    // one pipeline per entry point (the two ship meshes share theirs)
+    const made = new Map<string, Promise<GPURenderPipeline>>();
+    const get = (ep: string, sh: boolean) => {
+      if (!made.has(ep)) made.set(ep, sh ? shadow(ep, ep) : main(ep, ep));
+      return made.get(ep)!;
+    };
+    // Pipelines compile while the meshes are generated below. All main-pass pipelines share one
+    // large fragment shader (fsOpaque): the first compiles alone so the GPU process caches it, and
+    // the others then only add their vertex shaders. Started together, each would compile its own
+    // copy (measured on a cold shader cache: 14 s for these pipelines together, 2.6 s primed).
+    const update = computePipe(device, cmod, 'main', [fb, wb, lu]);
+    const table = computePipe(device, cmod, 'trailTable', [fb, wb, lu]);
+    const shadows = Promise.all(DRAWS.map((d) => (d[3] ? get(d[3], true) : Promise.resolve(null))));
+    const primed = get(DRAWS[0][2], false);
+
+    // ---- meshes, poses, rig ----
+    const rig = new Float32Array(RIG_VEC4 * 4);
+    const packed = pack([
+      genGrazer(rig).mb, genBird(rig).mb, genTitan(rig, 32).mb, genBiped(rig, 52, 'suit').mb, genBiped(rig, 64, 'stone').mb,
+      genJelly().mb, genRay().mb, genFighter().mb, genHauler().mb,
     ]);
+    this.draws = packed.draws;
+    this.stats.vertices = packed.vcount;
+    this.stats.triangles = packed.tris;
+    this.vbuf = bufferWith(device, packed.vb, U.VERTEX, 'faunaVerts');
+    this.ibuf = bufferWith(device, packed.ib, U.INDEX, 'faunaIdx');
+    this.poseBuf = buffer(device, FAUNA_N * POSE_VEC4 * 16, U.STORAGE | U.COPY_SRC, 'faunaPose');
+    const trailBuf = buffer(device, HERD_TAB_NS * HERD_TAB_NL * 8, U.STORAGE, 'herdTrail');
+    const rigBuf = bufferWith(device, rig, U.UNIFORM, 'faunaRig');
+    this.updateBG = device.createBindGroup({ layout: lu, entries: [
+      { binding: 0, resource: { buffer: this.poseBuf } },
+      { binding: 1, resource: { buffer: trailBuf } },
+    ] });
+    for (let c = 0; c < 4; c++) {
+      const u = bufferWith(device, new Uint32Array([c, 0, 0, 0]), U.UNIFORM);
+      this.drawBG.push(device.createBindGroup({ layout: ld, entries: [
+        { binding: 0, resource: { buffer: u } },
+        { binding: 1, resource: { buffer: this.poseBuf } },
+        { binding: 2, resource: { buffer: rigBuf } },
+      ] }));
+    }
+    this.pTable = await table;
+    await primed;
+    [this.pMain, this.pShadow, this.pUpdate] = await Promise.all([Promise.all(DRAWS.map((d) => get(d[2], false))), shadows, update]);
   }
+
+  // Fill the herd trail table, once. Its pass shares the update's layout, which includes the world
+  // bind group, so the renderer calls this at the end of its init, once that group exists.
+  encodeTable(enc: GPUCommandEncoder, worldBG: GPUBindGroup) {
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.pTable!);
+    pass.setBindGroup(0, this.ctx.frameBG);
+    pass.setBindGroup(1, worldBG);
+    pass.setBindGroup(2, this.updateBG);
+    pass.dispatchWorkgroups(Math.ceil((HERD_TAB_NS * HERD_TAB_NL) / 64));
+    pass.end();
+    this.pTable = null;
+  }
+  private pTable: GPUComputePipeline | null = null;
 
   encodeUpdate(pass: GPUComputePassEncoder, worldBG: GPUBindGroup) {
     pass.setPipeline(this.pUpdate);
     pass.setBindGroup(0, this.ctx.frameBG);
     pass.setBindGroup(1, worldBG);
     pass.setBindGroup(2, this.updateBG);
-    pass.dispatchWorkgroups(Math.ceil((FAUNA_NC + FAUNA_NB) / 64));
+    pass.dispatchWorkgroups(UPDATE_GROUPS);
   }
 
-  private record(enc: GPURenderBundleEncoder, cascade: number, creature: GPURenderPipeline, bird: GPURenderPipeline) {
+  private record(enc: GPURenderBundleEncoder, cascade: number, pipes: (GPURenderPipeline | null)[]) {
     enc.setBindGroup(3, this.drawBG[cascade]);
     enc.setVertexBuffer(0, this.vbuf);
     enc.setIndexBuffer(this.ibuf, 'uint32');
-    const [g, b] = this.draws;
-    enc.setPipeline(creature);
-    enc.drawIndexed(g.count, FAUNA_NC, g.first, g.base, 0);
-    enc.setPipeline(bird);
-    enc.drawIndexed(b.count, FAUNA_NB, b.first, b.base, 0);
+    for (let m = 0; m < DRAWS.length; m++) {
+      const p = pipes[m];
+      if (!p) continue;
+      const d = this.draws[m];
+      enc.setPipeline(p);
+      enc.drawIndexed(d.count, DRAWS[m][0], d.first, d.base, DRAWS[m][1]);
+    }
   }
 
   recordMain(enc: GPURenderBundleEncoder) {
-    this.record(enc, 0, this.pCreature, this.pBird);
+    this.record(enc, 0, this.pMain);
   }
 
   recordShadow(enc: GPURenderBundleEncoder, cascade: number) {
     enc.setBindGroup(0, this.ctx.frameBG);
     enc.setBindGroup(1, this.ctx.emptyBG);
     enc.setBindGroup(2, this.ctx.emptyBG);
-    this.record(enc, cascade, this.pCreatureSh, this.pBirdSh);
+    this.record(enc, cascade, this.pShadow);
   }
 
-  // Debug: this frame's full pose buffer (POSE_VEC4 vec4 = 20 floats per animal, herd first, then
-  // birds). Allocates; not used per frame.
+  // Debug: this frame's full pose buffer (POSE_VEC4 vec4 = 20 floats per slot, in the world.ts
+  // order: herd, birds, titans, travellers, colossi, jellies, rays, ships). Allocates; not per frame.
   async debugPoses(): Promise<number[]> {
     const { device } = this.ctx;
-    const n = (FAUNA_NC + FAUNA_NB) * POSE_VEC4 * 16;
+    const n = FAUNA_N * POSE_VEC4 * 16;
     const rb = buffer(device, n, U.MAP_READ | U.COPY_DST);
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(this.poseBuf, 0, rb, 0, n);

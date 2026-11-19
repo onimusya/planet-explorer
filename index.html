@@ -7,12 +7,83 @@
 <style>
   html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; }
   canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: crosshair; }
-  #load { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    font: 300 13px/1.6 system-ui, sans-serif; letter-spacing: .35em; color: #bfe9e6; background: radial-gradient(circle at 50% 60%, #102328 0%, #05070a 70%); transition: opacity 1.2s;
-    pointer-events: none; }
-  #load h1 { font-weight: 200; font-size: 26px; letter-spacing: .6em; margin: 0 0 18px; color: #e9fbf7; }
-  #bar { width: 240px; height: 1px; background: #1d3b3e; margin-top: 14px; }
-  #bar i { display: block; height: 100%; width: 0; background: #7ff3e2; transition: width .3s; }
+
+  /* Preloader: pure CSS, animated before any script runs. Frames render behind it once the world
+     is built; when it reports ready, a click or key press reveals the world and starts the music. */
+  #load { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font: 300 12px/1.6 system-ui, sans-serif; letter-spacing: .32em; color: #bfe9e6; user-select: none; overflow: hidden;
+    background: radial-gradient(ellipse 85% 75% at 50% 38%, #13262c 0%, #0a1519 40%, #05070a 80%); transition: opacity 1.4s ease; }
+  #load.ready { cursor: pointer; }
+  #load.out { opacity: 0; pointer-events: none; }
+  #load .sky, #load canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; cursor: inherit; }
+  #load .sky { background: radial-gradient(ellipse 60% 45% at 14% 86%, rgba(176, 64, 170, .08), transparent 70%),
+      radial-gradient(ellipse 50% 40% at 88% 14%, rgba(48, 170, 176, .07), transparent 70%); }
+  #load canvas + canvas { animation: twinkle 3.7s ease-in-out infinite alternate; }
+  @keyframes twinkle { from { opacity: .1; } to { opacity: 1; } }
+
+  /* ringed planet with an orbiting moon; the system is tilted, the moon passes in front of the
+     planet on the near half of its orbit and behind it on the far half */
+  #load .stage { position: relative; width: 500px; height: 330px; margin-bottom: 14px; transition: transform 1.6s cubic-bezier(.3, 0, .2, 1); }
+  #load.out .stage { transform: scale(1.08); }
+  #load .sys { position: absolute; left: 50%; top: 50%; transform: rotate(-16deg); }
+  #load .sys::before { content: ''; position: absolute; left: -240px; top: -240px; width: 480px; height: 480px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 196, 150, .13) 0%, rgba(120, 220, 210, .05) 38%, transparent 62%); }
+  #load .planet { position: absolute; left: -105px; top: -105px; width: 210px; height: 210px; border-radius: 50%; overflow: hidden; z-index: 2;
+    box-shadow: -7px -5px 34px rgba(255, 196, 150, .16); }
+  #load .bands { position: absolute; top: 0; left: 0; width: 200%; height: 100%; animation: spin 56s linear infinite;
+    background:
+      radial-gradient(ellipse 13% 5% at 38% 63%, rgba(150, 58, 34, .7), rgba(150, 58, 34, .25) 55%, transparent 72%) 0 0 / 50% 100% repeat-x,
+      radial-gradient(ellipse 22% 2.2% at 72% 31%, rgba(255, 246, 232, .6), transparent 72%) 0 0 / 50% 100% repeat-x,
+      radial-gradient(ellipse 30% 2.6% at 34% 45%, rgba(176, 112, 74, .55), transparent 72%) 0 0 / 50% 100% repeat-x,
+      radial-gradient(ellipse 18% 2% at 60% 77%, rgba(255, 238, 214, .5), transparent 72%) 0 0 / 50% 100% repeat-x,
+      radial-gradient(ellipse 22% 2.4% at 74% 53%, rgba(160, 96, 62, .45), transparent 72%) 0 0 / 50% 100% repeat-x,
+      linear-gradient(180deg, #e9c9a4 0%, #f3dcc0 9%, #dcac82 14%, #f6e5cf 21%, #e8c29b 27%, #c88a60 31%, #eccfac 36%, #f5e2ca 44%,
+        #d49b70 49%, #edd2b0 53%, #b9764f 58%, #e3b791 62%, #f2dbbf 69%, #d6a47b 75%, #f1d8b9 81%, #c98d62 87%, #e6c29d 93%, #d5a77f 100%); }
+  @keyframes spin { to { transform: translateX(-50%); } }
+  #load .planet::after { content: ''; position: absolute; inset: 0; border-radius: 50%;
+    background: radial-gradient(circle at 30% 26%, rgba(255, 250, 238, .36), transparent 36%),
+      radial-gradient(circle at 33% 29%, transparent 34%, rgba(10, 12, 18, .42) 50%, rgba(5, 6, 10, .86) 64%, rgba(3, 4, 7, .98) 78%);
+    box-shadow: inset 8px 6px 18px rgba(255, 236, 214, .2), inset -14px -12px 30px rgba(0, 0, 0, .5); }
+  #load .ring { position: absolute; left: -196px; top: -196px; width: 392px; height: 392px; border-radius: 50%; transform: scaleY(.24);
+    background: radial-gradient(closest-side, transparent 64%, rgba(236, 222, 202, .5) 66%, rgba(206, 184, 158, .24) 71%,
+      rgba(246, 234, 214, .7) 76%, rgba(232, 216, 194, .34) 80%, transparent 81.5%, rgba(220, 204, 182, .3) 84%, transparent 94%); }
+  #load .ring.back { z-index: 1; }
+  #load .ring.front { z-index: 3; clip-path: inset(50% 0 0 0); }
+  #load .orbit { position: absolute; left: 0; top: 0; transform: scaleY(.3); animation: oz 24s step-end infinite; }
+  #load .arm { position: absolute; left: 0; top: 0; animation: orbit 24s linear infinite; }
+  #load .moon { position: absolute; left: 226px; top: -10px; width: 20px; height: 20px; border-radius: 50%; animation: moon 24s linear infinite;
+    background: radial-gradient(circle at 34% 32%, #eef2f2, #9aa5aa 48%, #3a4246 78%, #20262a 100%); box-shadow: 0 0 10px rgba(220, 240, 245, .18); }
+  @keyframes orbit { to { transform: rotate(360deg); } }
+  @keyframes moon { from { transform: rotate(0deg) scaleY(3.333); } to { transform: rotate(-360deg) scaleY(3.333); } }
+  @keyframes oz { 0% { z-index: 4; } 50%, 100% { z-index: 0; } }
+
+  #load h1 { margin: 0 0 6px; padding-left: .62em; font-weight: 200; font-size: 30px; letter-spacing: .62em; color: #eefcf9;
+    text-shadow: 0 0 22px rgba(127, 243, 226, .28); }
+  #load .sub { padding-left: .42em; font-size: 10.5px; letter-spacing: .42em; color: rgba(191, 233, 230, .55); }
+  #load .foot { position: relative; width: 300px; height: 64px; margin-top: 34px; }
+  #prog { position: absolute; inset: 0; transition: opacity .6s; }
+  #load.ready #prog { opacity: 0; }
+  #bar { height: 1px; background: rgba(127, 243, 226, .16); }
+  #bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, rgba(127, 243, 226, .25), #7ff3e2);
+    box-shadow: 0 0 8px rgba(127, 243, 226, .8); transition: width .4s ease-out; }
+  #prog .row { display: flex; justify-content: space-between; margin-top: 10px; font-size: 10.5px; letter-spacing: .3em; }
+  #pct { color: #e9fbf7; font-variant-numeric: tabular-nums; letter-spacing: .12em; }
+  #go { position: absolute; left: 50%; top: -14px; padding: 13px 30px 13px 36px; white-space: nowrap; cursor: pointer;
+    font: 400 12px/1 system-ui, sans-serif; letter-spacing: .5em; color: #effdfb; background: rgba(127, 243, 226, .07);
+    border: 1px solid rgba(127, 243, 226, .5); border-radius: 999px; opacity: 0; pointer-events: none;
+    transform: translate(-50%, 8px); transition: opacity .9s, transform .9s, background .3s; }
+  #load.ready #go { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); animation: pulse 2.6s ease-in-out infinite; }
+  #go:hover, #go:focus-visible { background: rgba(127, 243, 226, .16); outline: none; }
+  @keyframes pulse { 50% { box-shadow: 0 0 26px rgba(127, 243, 226, .32), inset 0 0 12px rgba(127, 243, 226, .12); } }
+  #load .hint { position: absolute; left: 0; right: 0; top: 44px; text-align: center; font-size: 9.5px; letter-spacing: .3em;
+    color: rgba(191, 233, 230, .45); opacity: 0; transition: opacity .9s .3s; }
+  #load.ready .hint { opacity: 1; }
+  #tip { position: absolute; bottom: 7vh; max-width: 680px; padding: 0 24px; text-align: center; font: 400 12.5px/1.6 system-ui, sans-serif;
+    letter-spacing: .05em; color: rgba(200, 236, 232, .66); transition: opacity .6s; }
+  #tip b { margin-right: 12px; font-weight: 500; font-size: 9.5px; letter-spacing: .32em; color: #9fe8de; }
+  @media (max-width: 520px) { #load .stage { transform: scale(.68); margin: -40px 0 -30px; } }
+  @media (prefers-reduced-motion: reduce) { #load *, #load *::before, #load *::after, #load .sky::after { animation: none !important; } }
+
   #help { position: fixed; right: 16px; bottom: 16px; padding: 11px 16px 13px; pointer-events: none; user-select: none;
     font: 12px/1.4 system-ui, sans-serif; color: rgba(222,242,240,.86); letter-spacing: .02em;
     background: rgba(5,10,14,.6); border: 1px solid rgba(140,225,215,.2); border-radius: 8px;
@@ -25,13 +96,54 @@
   #help kbd { display: inline-block; min-width: 12px; padding: 0 5px; margin-left: 3px; font: 600 10.5px/16px ui-monospace, Consolas, monospace;
     text-align: center; color: #fff; background: rgba(255,255,255,.08); border: 1px solid rgba(190,240,232,.32); border-bottom-width: 2px; border-radius: 4px; }
   #help kbd:first-child { margin-left: 0; }
-  #err { position: fixed; left: 50%; top: 40%; transform: translateX(-50%); max-width: 520px; padding: 18px 22px; display: none;
+  #err { position: fixed; z-index: 11; left: 50%; top: 40%; transform: translateX(-50%); max-width: 520px; padding: 18px 22px; display: none;
     font: 14px/1.5 system-ui, sans-serif; color: #fde; background: rgba(40,10,20,.9); border: 1px solid #a45; border-radius: 6px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="load"><h1>ITHRA VAEL</h1><div id="msg">INITIALISING</div><div id="bar"><i></i></div></div>
+<div id="load">
+  <div class="sky"></div>
+  <canvas aria-hidden="true"></canvas><canvas aria-hidden="true"></canvas>
+  <script>
+    // Preloader star field, drawn once as the page parses (before the app script arrives): a
+    // fixed scatter, one star in seven on the twinkling layer.
+    (() => {
+      const [a, b] = document.querySelectorAll('#load canvas'), d = Math.min(devicePixelRatio || 1, 2);
+      const w = (a.width = b.width = innerWidth * d), h = (a.height = b.height = innerHeight * d);
+      const ga = a.getContext('2d'), gb = b.getContext('2d');
+      let s = 9;
+      const r = () => (s = (s * 16807) % 2147483647) / 2147483647;
+      for (let i = 0, n = innerWidth * innerHeight / 4800; i < n; i++) {
+        const x = r() * w, y = r() * h, m = r() ** 3, g = r() < 0.14 ? gb : ga;
+        g.globalAlpha = 0.22 + 0.78 * m;
+        g.fillStyle = m > 0.75 ? '#ffe6d4' : r() < 0.3 ? '#d2f2ff' : '#fff';
+        g.beginPath();
+        g.arc(x, y, (0.35 + 0.95 * m) * d, 0, 6.2832);
+        g.fill();
+      }
+    })();
+  </script>
+  <div class="stage" aria-hidden="true">
+    <div class="sys">
+      <div class="ring back"></div>
+      <div class="planet"><i class="bands"></i></div>
+      <div class="ring front"></div>
+      <div class="orbit"><div class="arm"><i class="moon"></i></div></div>
+    </div>
+  </div>
+  <h1>ITHRA VAEL</h1>
+  <div class="sub">AN ALIEN WORLD, BUILT IN YOUR BROWSER</div>
+  <div class="foot">
+    <div id="prog" role="progressbar" aria-label="Loading" aria-valuemin="0" aria-valuemax="100">
+      <div id="bar"><i></i></div>
+      <div class="row"><span id="msg">INITIALISING</span><span id="pct">0%</span></div>
+    </div>
+    <button id="go" type="button">CLICK TO EXPLORE</button>
+    <div class="hint">OR PRESS ANY KEY &nbsp;·&nbsp; SOUND ON</div>
+  </div>
+  <div id="tip"><b>TIP</b><span></span></div>
+</div>
 <aside id="help" aria-label="Controls">
   <h2>Controls</h2>
   <div class="cols">

@@ -82,7 +82,7 @@ fn vsShadow(v: VIn) -> VOut {
 // Fauna (fauna.ts): rest-pose meshes posed per vertex from the pose buffer that fauna.wgsl writes
 // each frame (5 vec4 per animal). attr = (part, bone / 255, ao, blend weight), uv.y = along / 64.
 @group(3) @binding(1) var<storage, read> faunaPose: array<vec4f>;
-@group(3) @binding(2) var<uniform> rig: array<vec4f, 28>;
+@group(3) @binding(2) var<uniform> rig: array<vec4f, 96>;
 
 struct FIn {
   @location(0) pos: vec3f,
@@ -103,7 +103,7 @@ struct Posed { p: vec3f, n: vec3f };
 // 8-11 lower legs (LF, RF, LH, RH). Rig: 0-3 hips (xyz, upper length), 4-7 rest knees (xyz, lower
 // length), 8 neck pivot, 9 head pivot, 10 tail pivot, 11 gait (stride, lift, duty), 12/13 rest
 // upper/lower leg angles, 14 knee bend sign, 15/16 rest foot z/y.
-fn poseCreature(v: FIn, base: u32) -> Posed {
+fn poseCreature(v: FIn, base: u32, rb: u32) -> Posed {
   var o: Posed;
   o.p = v.pos;
   o.n = v.nrm.xyz;
@@ -114,9 +114,9 @@ fn poseCreature(v: FIn, base: u32) -> Posed {
   if (bone >= 4u) {
     // legs: planted-foot gait cycle, solved by two-bone IK in the leg's sagittal plane
     let L = (bone - 4u) & 3u;
-    let hip = rig[L];
-    let knee0 = rig[4u + L];
-    let gp = rig[11];
+    let hip = rig[rb + L];
+    let knee0 = rig[rb + 4u + L];
+    let gp = rig[rb + 11u];
     let ph = fract(P1.z + f32(L & 1u) * 0.5 + select(0.0, 0.25, L < 2u));
     var fz = 0.0;
     var fy = 0.0;
@@ -127,32 +127,32 @@ fn poseCreature(v: FIn, base: u32) -> Posed {
       fz = gp.x * (q * q * (3.0 - 2.0 * q) - 0.5);
       fy = gp.y * P1.w * sin(PI * q);
     }
-    let foot = vec2f(rig[16][L] + fy + faunaPose[base + 3u][L], rig[15][L] + fz);
+    let foot = vec2f(rig[rb + 16u][L] + fy + faunaPose[base + 3u][L], rig[rb + 15u][L] + fz);
     let H = hip.yz;
     let dv = foot - H;
     let l1 = hip.w;
     let l2 = knee0.w;
     let d = clamp(length(dv), abs(l1 - l2) + 0.02, (l1 + l2) * 0.995);
     let cosA = clamp((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d), -1.0, 1.0);
-    let aU = downAng(dv) + rig[14][L] * acos(cosA);
+    let aU = downAng(dv) + rig[rb + 14u][L] * acos(cosA);
     let K = H + l1 * vec2f(-cos(aU), sin(aU));
     // the thigh eases out of the body near the hip; the shin blends with the thigh at the knee
     let kU = select(1.0, w, bone < 8u);
-    let rU = (rig[12][L] - aU) * kU;
+    let rU = (rig[rb + 12u][L] - aU) * kU;
     let pU = vec3f(v.pos.x, H) + rotX(vec3f(0.0, v.pos.yz - H), rU);
     let nU = rotX(o.n, rU);
     if (bone < 8u) {
       o.p = pU;
       o.n = nU;
     } else {
-      let rL = rig[13][L] - downAng(foot - K);
+      let rL = rig[rb + 13u][L] - downAng(foot - K);
       let pL = vec3f(v.pos.x, K) + rotX(vec3f(0.0, v.pos.yz - knee0.yz), rL);
       o.p = mix(pU, pL, w);
       o.n = mix(nU, rotX(o.n, rL), w);
     }
   } else if (bone == 3u) {
     // tail: swish about its root, the angle growing toward the tip
-    let tp = rig[10].xyz;
+    let tp = rig[rb + 10u].xyz;
     o.p = tp + rotY(v.pos - tp, P2.w * w);
     o.n = rotY(o.n, P2.w * w);
   } else if (bone >= 1u) {
@@ -161,12 +161,12 @@ fn poseCreature(v: FIn, base: u32) -> Posed {
     var n = o.n;
     var k = w;
     if (bone == 2u) {
-      let hp = rig[9].xyz;
+      let hp = rig[rb + 9u].xyz;
       p = hp + rotX(p - hp, P2.z);
       n = rotX(n, P2.z);
       k = 1.0;
     }
-    let np = rig[8].xyz;
+    let np = rig[rb + 8u].xyz;
     o.p = np + rotY(rotX(p - np, P2.x * k), P2.y * k);
     o.n = rotY(rotX(n, P2.x * k), P2.y * k);
   }
@@ -185,16 +185,162 @@ fn faunaVOut(wp: vec3f, n: vec3f, v: FIn, info: vec4f) -> VOut {
   return o;
 }
 
-fn creatureV(v: FIn, ii: u32) -> VOut {
+// Quadrupeds: the herd animal (rig base 0, species 20) and the titans (rig base 32, species 24).
+fn creatureV(v: FIn, ii: u32, rb: u32, sp: f32) -> VOut {
   let base = ii * 5u;
   let P0 = faunaPose[base];
   let P1 = faunaPose[base + 1u];
   let P4 = faunaPose[base + 4u];
-  let ps = poseCreature(v, base);
+  let ps = poseCreature(v, base, rb);
   // body: roll, pitch (nose up), heading; then scale and place, with the walking bob
   let wp = rotY(rotX(rotZ(ps.p, P1.y), -P1.x), P0.w) * P4.x + P0.xyz + vec3f(0.0, P4.z, 0.0);
   let n = rotY(rotX(rotZ(ps.n, P1.y), -P1.x), P0.w);
-  return faunaVOut(wp, n, v, vec4f(round(v.attr.x * 255.0), 20.0, P4.y, P4.x));
+  return faunaVOut(wp, n, v, vec4f(round(v.attr.x * 255.0), sp, P4.y, P4.x));
+}
+
+// Humanoid skeleton (travellers: rig base 52, species 25; colossi: rig base 64, species 26):
+// 30 body, 31 head and neck, 32/33 upper arms, 34/35 forearms, 36/37 thighs, 38/39 shins (left,
+// right). Rig: +0 neck pivot, +1/+2 shoulders, +3/+4 elbows, +5/+6 hips, +7/+8 knees, +9 gait
+// (hip swing, knee lift, arm swing, elbow rest), +10 (pelvis height). Limbs swing in their
+// sagittal planes: hips and shoulders forward (rotX < 0), knees back, elbows forward.
+fn bipedV(v: FIn, ii: u32, rb: u32, sp: f32) -> VOut {
+  let base = ii * 5u;
+  let P0 = faunaPose[base];
+  let P1 = faunaPose[base + 1u];
+  let P2 = faunaPose[base + 2u];
+  let P4 = faunaPose[base + 4u];
+  let bone = u32(round(v.attr.y * 255.0));
+  let w = v.attr.w;
+  let g = rig[rb + 9u];
+  let ph = P1.x * TAU;
+  let walk = P1.y;
+  var p = v.pos;
+  var n = v.nrm.xyz;
+  if (bone >= 36u) {
+    let s = (bone - 36u) & 1u;
+    let a = ph + f32(s) * PI;
+    let hip = rig[rb + 5u + s].xyz;
+    let hf = walk * g.x * sin(a);
+    // the knee folds through the swing, when the foot comes forward
+    let kf = walk * (g.y * pow(max(cos(a), 0.0), 1.5) + 0.06);
+    if (bone < 38u) {
+      p = hip + rotX(p - hip, -hf * w);
+      n = rotX(n, -hf * w);
+    } else {
+      let knee = rig[rb + 7u + s].xyz;
+      p = hip + rotX(knee + rotX(p - knee, kf * w) - hip, -hf);
+      n = rotX(rotX(n, kf * w), -hf);
+    }
+  } else if (bone >= 32u) {
+    let s = (bone - 32u) & 1u;
+    let a = ph + f32(1u - s) * PI;
+    let sh = rig[rb + 1u + s].xyz;
+    // arms swing against the legs; the second arm also rises forward to scan or to reach up
+    let raise = select(0.0, P2.z, s == 1u);
+    let sf = walk * g.z * sin(a) + raise * 1.45;
+    let ef = g.w + walk * 0.22 * max(sin(a), 0.0) + raise * 0.35;
+    if (bone < 34u) {
+      p = sh + rotX(p - sh, -sf * w);
+      n = rotX(n, -sf * w);
+    } else {
+      let el = rig[rb + 3u + s].xyz;
+      p = sh + rotX(el + rotX(p - el, -ef * w) - sh, -sf);
+      n = rotX(rotX(n, -ef * w), -sf);
+    }
+  } else if (bone == 31u) {
+    let nk = rig[rb].xyz;
+    p = nk + rotY(rotX(p - nk, P2.y * w), P2.x * w);
+    n = rotY(rotX(n, P2.y * w), P2.x * w);
+  }
+  if (bone < 36u) {
+    // the upper body leans forward from the pelvis
+    let pel = vec3f(0.0, rig[rb + 10u].x, 0.0);
+    p = pel + rotX(p - pel, P1.z);
+    n = rotX(n, P1.z);
+  }
+  let wp = rotY(p, P0.w) * P4.x + P0.xyz + vec3f(0.0, P4.z, 0.0);
+  var o = faunaVOut(wp, rotY(n, P0.w), v, vec4f(round(v.attr.x * 255.0), sp, P4.y, P4.x));
+  o.ag.y = P1.w; // jet thrust, for the nozzle glow
+  return o;
+}
+
+// Sky jelly: 0 bell (w: 0 at the apex to 1 at the rim), 1 oral arms and tentacles (w: 0 at the
+// root to 1 at the tip). Each pulse squeezes the rim in and lifts the tentacles, which also stream
+// behind the drift. Pose: (pos, spin), (pulse phase, drift x, drift z, -), -, -, (scale, seed, ...).
+fn jellyV(v: FIn, ii: u32) -> VOut {
+  let base = ii * 5u;
+  let P0 = faunaPose[base];
+  let P1 = faunaPose[base + 1u];
+  let P4 = faunaPose[base + 4u];
+  let bone = u32(round(v.attr.y * 255.0));
+  let w = v.attr.w;
+  let ph = fract(P1.x);
+  let c = smoothstep(0.0, 0.2, ph) * (1.0 - smoothstep(0.2, 0.8, ph));
+  var p = v.pos;
+  var n = v.nrm.xyz;
+  var drag = vec3f(0.0);
+  if (bone == 0u) {
+    let k = 1.0 - 0.2 * c * w * w;
+    p = vec3f(p.x * k, p.y * (1.0 + 0.1 * c * (1.0 - w)) - 0.06 * c * w, p.z * k);
+    n = normalize(vec3f(n.x, n.y * k, n.z));
+  } else {
+    let tt = time();
+    let sw = w * w;
+    let k = 1.0 - 0.2 * c * (1.0 - w);
+    p = vec3f(p.x * k, p.y + sw * 0.3 * c, p.z * k);
+    p += vec3f(sin(tt * 0.9 + p.y * 1.3 + P4.y * 20.0), 0.0, cos(tt * 0.7 + p.y * 1.1 + P4.y * 31.0)) * (0.3 * sw);
+    drag = vec3f(-P1.y, 0.0, -P1.z) * sw;
+  }
+  let wp = rotY(p, P0.w) * P4.x + drag * P4.x + P0.xyz;
+  return faunaVOut(wp, rotY(n, P0.w), v, vec4f(round(v.attr.x * 255.0), 27.0, P4.y, P4.x));
+}
+
+// Rigid fliers posed from (forward, bank) like the birds: right, up, forward axes.
+fn flyAxes(P1: vec4f) -> mat3x3f {
+  let f = P1.xyz;
+  let r0 = normalize(cross(vec3f(0.0, 1.0, 0.0), f) + vec3f(1e-4, 0.0, 0.0));
+  let u0 = cross(f, r0);
+  return mat3x3f(r0 * cos(P1.w) - u0 * sin(P1.w), u0 * cos(P1.w) + r0 * sin(P1.w), f);
+}
+
+// Sky ray: 0 body and wings, undulating in a wave that runs from the front edge to the back and
+// grows toward the tips; 1 tail (w along it), swaying. Pose as the birds' (veg.wgsl birdV).
+fn rayV(v: FIn, ii: u32) -> VOut {
+  let base = ii * 5u;
+  let P0 = faunaPose[base];
+  let P1 = faunaPose[base + 1u];
+  let P2 = faunaPose[base + 2u];
+  let P3 = faunaPose[base + 3u];
+  let bone = u32(round(v.attr.y * 255.0));
+  var p = v.pos;
+  var n = v.nrm.xyz;
+  if (bone == 0u) {
+    let ax = abs(p.x);
+    let arg = P2.x - p.z * 2.4 - ax * 0.8;
+    p.y += P2.y * pow(ax, 1.6) * sin(arg);
+    let slope = P2.y * 1.6 * pow(max(ax, 1e-3), 0.6) * sin(arg) * sign(p.x);
+    n = normalize(n + vec3f(-slope, 0.0, 0.0) * sign(n.y));
+  } else {
+    let w = v.attr.w;
+    let a = (P3.x + 0.25 * sin(P2.x * 0.7 - w * 4.0)) * w;
+    let root = vec3f(0.0, 0.0, -0.42);
+    p = root + rotY(p - root, a);
+    n = rotY(n, a);
+  }
+  let m = flyAxes(P1);
+  return faunaVOut(P0.xyz + m * p * P0.w, m * n, v, vec4f(round(v.attr.x * 255.0), 28.0, P2.w, P0.w));
+}
+
+// Starship: rigid. Pose (pos, scale: 0 between passes), (forward, bank), (thrust, variant, seed, -).
+// The engine thrust rides in the grad slot for the nozzle glow.
+fn shipV(v: FIn, ii: u32) -> VOut {
+  let base = ii * 5u;
+  let P0 = faunaPose[base];
+  let P2 = faunaPose[base + 2u];
+  let m = flyAxes(faunaPose[base + 1u]);
+  var o = faunaVOut(P0.xyz + m * v.pos * P0.w, m * v.nrm.xyz, v, vec4f(round(v.attr.x * 255.0), 29.0, P2.z, P0.w));
+  o.ag.y = P2.x;
+  return o;
 }
 
 // Flyer skeleton: 20 body, 21/22 inner wing L/R, 23/24 outer wing L/R, 25 tail. Rig: 20/21 shoulder
@@ -242,19 +388,21 @@ fn birdV(v: FIn, ii: u32) -> VOut {
   return faunaVOut(wp, r * n.x + u * n.y + f * n.z, v, vec4f(round(v.attr.x * 255.0), 21.0 + P3.z, P2.w, P0.w));
 }
 
-@vertex
-fn vsCreature(v: FIn, @builtin(instance_index) ii: u32) -> VOut {
-  var o = creatureV(v, ii);
-  o.pos = F.viewProj * vec4f(o.rel, 1.0);
-  return o;
-}
+fn toClip(o: VOut) -> VOut { var r = o; r.pos = F.viewProj * vec4f(o.rel, 1.0); return r; }
+fn toShadow(o: VOut) -> VOut { var r = o; r.pos = F.shadowMats[cascadeIdx.x] * vec4f(o.rel, 1.0); return r; }
 
-@vertex
-fn vsCreatureShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut {
-  var o = creatureV(v, ii);
-  o.pos = F.shadowMats[cascadeIdx.x] * vec4f(o.rel, 1.0);
-  return o;
-}
+@vertex fn vsCreature(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(creatureV(v, ii, 0u, 20.0)); }
+@vertex fn vsCreatureShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toShadow(creatureV(v, ii, 0u, 20.0)); }
+@vertex fn vsTitan(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(creatureV(v, ii, 32u, 24.0)); }
+@vertex fn vsTitanShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toShadow(creatureV(v, ii, 32u, 24.0)); }
+@vertex fn vsTraveller(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(bipedV(v, ii, 52u, 25.0)); }
+@vertex fn vsTravellerShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toShadow(bipedV(v, ii, 52u, 25.0)); }
+@vertex fn vsColossus(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(bipedV(v, ii, 64u, 26.0)); }
+@vertex fn vsColossusShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toShadow(bipedV(v, ii, 64u, 26.0)); }
+@vertex fn vsJelly(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(jellyV(v, ii)); }
+@vertex fn vsRay(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(rayV(v, ii)); }
+@vertex fn vsRayShadow(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toShadow(rayV(v, ii)); }
+@vertex fn vsShip(v: FIn, @builtin(instance_index) ii: u32) -> VOut { return toClip(shipV(v, ii)); }
 
 @vertex
 fn vsBird(v: FIn, @builtin(instance_index) ii: u32) -> VOut {
@@ -297,7 +445,187 @@ const GILL_RIBS: f32 = 96.0;
 // Fauna surfaces. Herd animals (sp 20): indigo saddle with striped edges over pale teal or lilac
 // flanks, cream belly, dark socks and rows of luminous spots. Flyers (sp 21-23, one palette per
 // flock). lp is the rest-pose position, so markings stay on the skin as it moves.
-fn faunaMat(part: f32, sp: f32, seed: f32, uv: vec2f, lp: vec3f, glow: f32) -> Mat {
+// Titans (24), travellers (25), colossi (26), sky jellies (27), sky rays (28) and starships (29).
+// lp is the rest-pose position in model units; grad carries a ship's engine thrust.
+fn pick4(i: f32, a: vec3f, b: vec3f, c: vec3f, d: vec3f) -> vec3f {
+  if (i < 1.0) { return a; }
+  if (i < 2.0) { return b; }
+  if (i < 3.0) { return c; }
+  return d;
+}
+
+fn lifeMat(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, lp: vec3f, glow: f32) -> Mat {
+  var m: Mat;
+  m.alb = vec3f(0.4);
+  m.rough = 0.55;
+  m.emit = vec3f(0.0);
+  m.trans = 0.0;
+  m.spec = 0.04;
+  let n = noise3(lp * 4.0 + seed * 9.0, BIGP3);
+  if (part == 12.0) { // eyes: glossy; the colossi's burn
+    m.alb = vec3f(0.01);
+    m.rough = 0.08;
+    m.spec = 0.08;
+    m.emit = select(vec3f(0.04, 0.1, 0.12) * glow, vec3f(0.35, 0.95, 1.0) * 6.0, sp > 25.5 && sp < 26.5);
+    return m;
+  }
+  if (part == 13.0) {
+    m.alb = vec3f(0.08, 0.07, 0.07);
+    m.rough = 0.45;
+    return m;
+  }
+  if (sp < 24.5) { // titans: sandstone flanks, dark saddle stripes, pale belly, amber back plates
+    let tint = fract(seed * 3.17);
+    if (part == 11.0) {
+      let tip = smoothstep(0.35, 1.0, uv.y);
+      m.alb = mix(vec3f(0.45, 0.22, 0.08), vec3f(0.95, 0.62, 0.25), tip * 0.6);
+      m.trans = 0.6;
+      m.rough = 0.45;
+      m.emit = vec3f(1.0, 0.5, 0.12) * tip * tip * 0.5 * glow;
+      return m;
+    }
+    let flank = mix(vec3f(0.6, 0.4, 0.27), vec3f(0.42, 0.43, 0.5), tint);
+    let back = mix(vec3f(0.2, 0.12, 0.1), vec3f(0.13, 0.12, 0.17), tint);
+    let stripe = smoothstep(0.35, 0.65, 0.5 + 0.5 * sin(lp.z * 7.0 + n * 2.2 + sin(lp.x * 6.0)));
+    let top = smoothstep(1.55, 1.95, lp.y + stripe * 0.35 + n * 0.08) + smoothstep(2.0, 2.4, lp.y) * stripe * 0.6;
+    var c = mix(flank, back, sat(top));
+    c = mix(c, vec3f(0.8, 0.72, 0.6), (1.0 - smoothstep(1.05, 1.3, lp.y + n * 0.06)) * smoothstep(0.55, 0.85, lp.y));
+    c = mix(c, back * 0.7, 1.0 - smoothstep(0.15, 0.5, lp.y));
+    m.alb = c * (0.85 + 0.3 * n);
+    m.rough = 0.78;
+    m.trans = 0.1;
+    return m;
+  }
+  if (sp < 25.5) { // travellers' exosuits: four liveries, light strips, glossy visors, jets
+    let li = floor(fract(seed * 4.13) * 4.0);
+    let mainC = pick4(li, vec3f(0.8, 0.33, 0.05), vec3f(0.84, 0.84, 0.8), vec3f(0.06, 0.4, 0.43), vec3f(0.58, 0.07, 0.05));
+    let secC = pick4(li, vec3f(0.8, 0.8, 0.76), vec3f(0.17, 0.21, 0.25), vec3f(0.8, 0.75, 0.64), vec3f(0.14, 0.14, 0.16));
+    let acc = pick4(li, vec3f(0.2, 0.9, 1.0), vec3f(1.0, 0.6, 0.15), vec3f(1.0, 0.3, 0.8), vec3f(0.6, 0.95, 1.0));
+    if (part == 20.0) { // visor
+      m.alb = vec3f(0.02, 0.025, 0.03);
+      m.rough = 0.04;
+      m.spec = 0.09;
+      m.emit = acc * 0.16;
+      return m;
+    }
+    if (part == 21.0) { // jet nozzles
+      m.alb = vec3f(0.07);
+      m.rough = 0.35;
+      m.emit = mix(acc, vec3f(1.0), 0.4) * (0.25 + 6.0 * grad);
+      return m;
+    }
+    let ax = abs(lp.x);
+    let dark = vec3f(0.05, 0.05, 0.06);
+    var c = secC;
+    var r = 0.6;
+    if (lp.y > 1.53 && ax < 0.16) { c = mainC; r = 0.38; }                               // helmet
+    else if (lp.z < -0.125 && lp.y > 1.0 && lp.y < 1.47) { c = select(secC, mainC, ax > 0.1); } // backpack
+    else if (ax < 0.2 && lp.y > 0.86) {                                                   // torso
+      c = select(secC, mainC, lp.z > 0.03 && lp.y > 1.15);
+      if (lp.y < 0.97) { c = dark; r = 0.7; }                                             // belt
+    } else if (lp.y > 0.8 && ax >= 0.2) {                                                 // arms
+      c = select(secC, mainC, lp.y > 1.36);
+      if (lp.y < 0.87) { c = dark; r = 0.7; }                                             // gloves
+    } else {                                                                              // legs
+      c = select(secC, mainC, lp.y > 0.45 && lp.y < 0.58);
+      if (lp.y < 0.17) { c = dark; r = 0.72; }                                            // boots
+    }
+    m.alb = c * (0.9 + 0.15 * n);
+    m.rough = r;
+    m.spec = 0.05;
+    // light strips: across the chest, along the backpack's top edge, at the helmet's temples
+    let chest = step(0.08, lp.z) * (1.0 - smoothstep(0.008, 0.016, abs(lp.y - 1.3))) * (1.0 - smoothstep(0.07, 0.09, ax));
+    let pack = step(lp.z, -0.2) * smoothstep(1.39, 1.41, lp.y) * (1.0 - smoothstep(0.09, 0.11, ax)) * step(lp.y, 1.45);
+    let temple = step(1.6, lp.y) * step(lp.y, 1.72) * smoothstep(0.118, 0.126, ax) * step(-0.02, lp.z);
+    m.emit = acc * (chest * 3.0 + pack * 2.0 + temple * 1.5);
+    return m;
+  }
+  if (sp < 26.5) { // colossi: basalt cut by glowing veins, crystal shards on the shoulders
+    let vc = mix(vec3f(0.25, 0.85, 1.0), vec3f(0.85, 0.35, 1.0), fract(seed * 2.7));
+    if (part == 11.0) {
+      let tip = smoothstep(0.2, 1.0, uv.y);
+      m.alb = vc * 0.25;
+      m.rough = 0.12;
+      m.spec = 0.08;
+      m.trans = 0.6;
+      m.emit = vc * (0.25 + 1.4 * tip * tip) * glow;
+      return m;
+    }
+    let n2 = noise3(lp * 13.0 + seed * 5.0, BIGP3);
+    var c = mix(vec3f(0.1, 0.09, 0.12), vec3f(0.25, 0.22, 0.23), smoothstep(-0.4, 0.5, n + 0.3 * n2));
+    c = mix(c, vec3f(0.2, 0.27, 0.18), smoothstep(0.25, 0.55, n2) * smoothstep(1.0, 1.4, lp.y) * 0.6); // lichen
+    m.alb = c;
+    m.rough = 0.88;
+    m.spec = 0.03;
+    let vein = 1.0 - smoothstep(0.0, 0.05, abs(noise3(lp * vec3f(5.0, 3.0, 5.0) + seed * 3.0, BIGP3)));
+    m.emit = vc * vein * smoothstep(0.2, 0.6, lp.y) * 1.3 * glow;
+    return m;
+  }
+  if (sp < 27.5) { // sky jellies: translucent bells, luminous rims and ribs, glowing tentacle tips
+    let c = mix(vec3f(0.95, 0.38, 0.95), vec3f(0.3, 0.85, 1.0), smoothstep(0.3, 0.7, fract(seed * 3.3)));
+    m.trans = 1.0;
+    m.rough = 0.3;
+    m.spec = 0.06;
+    if (part == 23.0) {
+      let rim = smoothstep(0.78, 1.0, uv.y);
+      let ribs = smoothstep(0.75, 1.0, cos(uv.x * TAU * 8.0)) * smoothstep(0.2, 0.8, uv.y);
+      m.alb = c * 0.35 + 0.1;
+      m.emit = c * (0.12 + 1.1 * rim + 0.5 * ribs) * glow;
+    } else {
+      m.alb = c * 0.3;
+      m.emit = c * (0.15 + 1.2 * smoothstep(0.45, 1.0, uv.y)) * 0.8 * glow;
+    }
+    return m;
+  }
+  if (sp < 28.5) { // sky rays: indigo backs with pale spots, cream bellies, glowing wing margins
+    let below = lp.y < -0.002;
+    let g = vec2f(lp.x * 11.0, lp.z * 11.0);
+    let sd = length(fract(g) - 0.5 - (hash22(vec2i(floor(g))) - 0.5) * 0.5);
+    let spot = 1.0 - smoothstep(0.1, 0.18, sd);
+    var c = mix(vec3f(0.06, 0.08, 0.17), vec3f(0.6, 0.66, 0.74), spot * 0.7);
+    c = select(c, vec3f(0.78, 0.74, 0.68) * (0.9 + 0.1 * n), below);
+    m.alb = c;
+    m.rough = 0.5;
+    m.trans = 0.35;
+    let edge = smoothstep(0.8, 0.97, max(abs(uv.y - 0.5) * 2.0, uv.x));
+    m.emit = vec3f(0.2, 0.85, 1.0) * edge * spot * 1.6 * glow;
+    return m;
+  }
+  // starships: two-tone liveries, panel seams, glossy canopies, engine glow with the thrust
+  let li = floor(fract(seed * 5.31) * 4.0);
+  let base = pick4(li, vec3f(0.82, 0.8, 0.76), vec3f(0.46, 0.5, 0.56), vec3f(0.62, 0.1, 0.07), vec3f(0.12, 0.42, 0.45));
+  let stripeC = pick4(li, vec3f(0.78, 0.25, 0.06), vec3f(0.92, 0.58, 0.1), vec3f(0.85, 0.85, 0.8), vec3f(0.92, 0.9, 0.84));
+  let engC = pick4(li, vec3f(0.3, 0.8, 1.0), vec3f(1.0, 0.55, 0.2), vec3f(1.0, 0.35, 0.75), vec3f(0.45, 1.0, 0.85));
+  if (part == 17.0) {
+    m.alb = vec3f(0.015, 0.02, 0.03);
+    m.rough = 0.04;
+    m.spec = 0.1;
+    m.emit = vec3f(0.04, 0.09, 0.11);
+    return m;
+  }
+  if (part == 18.0) {
+    m.alb = vec3f(0.05);
+    m.emit = engC * (1.5 + 7.0 * grad) * (0.92 + 0.08 * sin(time() * 37.0 + seed * 50.0));
+    return m;
+  }
+  let ax = abs(lp.x);
+  let stripe = (1.0 - smoothstep(0.22, 0.3, ax)) * step(0.4, lp.y) + smoothstep(5.0, 5.2, ax) * (1.0 - smoothstep(6.0, 6.2, ax));
+  let seam = (1.0 - smoothstep(0.0, 0.05, abs(fract(lp.z / 1.6) - 0.5) - 0.44)) + (1.0 - smoothstep(0.0, 0.05, abs(fract(lp.x / 1.3) - 0.5) - 0.44));
+  // pale countershaded bellies keep ships readable from the ground, where only the shaded
+  // underside faces the viewer
+  let belly = 1.0 - smoothstep(-0.3, 0.12, lp.y + n * 0.08);
+  let hullC = mix(mix(base, stripeC, sat(stripe)), vec3f(0.7, 0.7, 0.68), belly * 0.7);
+  m.alb = hullC * (1.0 - 0.18 * sat(seam)) * (0.86 + 0.22 * n);
+  m.rough = mix(0.32, 0.5, smoothstep(-0.2, 0.6, n));
+  m.spec = 0.06;
+  // running lights on the wingtips, red to port and green to starboard, slowly blinking
+  let tipL = smoothstep(6.95, 7.1, ax) * (0.4 + 0.6 * step(0.5, fract(time() * 0.7 + seed)));
+  m.emit = select(vec3f(0.1, 1.0, 0.3), vec3f(1.0, 0.1, 0.05), lp.x < 0.0) * tipL * 3.0;
+  return m;
+}
+
+fn faunaMat(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, lp: vec3f, glow: f32) -> Mat {
+  if (sp > 23.5) { return lifeMat(part, sp, seed, uv, grad, lp, glow); }
   var m: Mat;
   m.alb = vec3f(0.4);
   m.rough = 0.55;
@@ -384,7 +712,7 @@ fn material(part: f32, sp: f32, seed: f32, uv: vec2f, grad: f32, wp: vec3f, lp: 
   m.trans = 0.0;
   m.spec = 0.04;
   let glow = 1.0 + valley * 1.5 + F.extra.z;
-  if (part >= 10.0) { return faunaMat(part, sp, seed, uv, lp, glow); }
+  if (part >= 10.0) { return faunaMat(part, sp, seed, uv, grad, lp, glow); }
   let gn = fbm(vec2f(uv.x * 8.0, uv.y * 2.0), vec2i(8, 1 << 20), 3, 0.5);
   if (part == 0.0) { // bark
     let groove = abs(sin(uv.x * TAU * 5.0 + gn * 3.0));
@@ -496,7 +824,7 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   let L = F.sunDir.xyz;
   var n = normalize(in.nrm);
   // closed fauna surfaces keep their normals; fins, membranes and flora are two-sided
-  let closed = part == 10.0 || part == 12.0 || part == 13.0 || part == 14.0;
+  let closed = part == 10.0 || part == 12.0 || part == 13.0 || part == 14.0 || (part >= 16.0 && part <= 22.0) || part == 25.0;
   if (!front && !closed) { n = -n; }
   let valley = valleyMask(in.world.xz);
   var m = material(part, sp, seed, in.uv, in.ag.y, in.world, in.lpos, valley, ribAA);
@@ -539,8 +867,8 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
   col += m.alb * ambientSH(n) * ao;
   let R = reflect(-V, n);
   let nv = sat(dot(n, V));
-  if (part == 5.0) {
-    // gems: full Fresnel sky reflection (lower hemisphere mirrored and darkened as ground)
+  if (part == 5.0 || part == 17.0 || part == 20.0) {
+    // gems, canopies, visors: full Fresnel sky reflection (lower hemisphere mirrored and darkened as ground)
     let fr = m.spec + (1.0 - m.spec) * pow(1.0 - nv, 5.0);
     let rs = skyColor(normalize(vec3f(R.x, abs(R.y), R.z))) * select(0.35, 1.0, R.y > 0.0);
     col += rs * fr * mix(0.4, 1.0, sh);
@@ -554,7 +882,7 @@ fn shade(in: VOut, front: bool, cut: bool) -> vec4f {
     // outline melts into its halo instead of reading as a flat, clipped polygon
     m.emit *= 0.15 + 0.85 * nv * nv;
   }
-  if (part >= 10.0 && part != 12.0) {
+  if (part >= 10.0 && part != 12.0 && !(part >= 16.0 && part <= 18.0) && part != 20.0 && part != 21.0) {
     // creature sheen: a velvet rim at grazing angles that lifts silhouettes off dark backdrops
     let rim = pow(1.0 - nv, 4.0);
     col += (m.alb * 0.7 + 0.03) * rim * (ambientSH(n) * 1.6 + sunC * sh * sat(ndl + 0.6) * 0.5) * ao;

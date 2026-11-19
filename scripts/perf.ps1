@@ -6,7 +6,7 @@ $pose = if ($Pose -ne "") { "p.pose($Pose);" } else { "p.view($View);" }
 $extra = if ($Eval -ne "") { "$Eval;" } else { "" }
 $js = @"
 (async () => {
-  const p = window.__pe; p.overlay(true); $pose p.scale($Scale); p.volDebug($Vol); $extra
+  const p = window.__pe; if (p.enter) p.enter(); p.overlay(true); $pose p.scale($Scale); p.volDebug($Vol); $extra
   await new Promise(r => setTimeout(r, 1200));
   const acc = new Float64Array(8); let n = 0;
   const t0 = performance.now();

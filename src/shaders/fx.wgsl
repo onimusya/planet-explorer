@@ -7,6 +7,7 @@
 //#include "common.wgsl"
 //#include "noise.wgsl"
 //#include "world.wgsl"
+//#include "ships.wgsl"
 
 @group(2) @binding(0) var sceneDepth: texture_depth_2d;
 
@@ -92,5 +93,82 @@ fn fs(in: PO) -> @location(0) vec4f {
   let sz = viewZ(textureLoad(sceneDepth, ip, 0));
   let soft = sat((sz - in.vz) / 0.5);
   let fall = (exp(-r2 * 3.5) - 0.0302) / 0.9698;
+  return vec4f(in.col * fall * soft, 0.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Starship engine trails: one camera-facing ribbon per engine (two per ship), through the ship's
+// nozzle positions over the last SHIP_TRAIL seconds, re-evaluated from its flight path
+// (ships.wgsl). White-hot at the nozzle, cooling to the ship's engine colour and spreading as it
+// fades; dimmed with distance by the haze. Same additive layer and depth test as the particles.
+struct TO {
+  @builtin(position) pos: vec4f,
+  @location(0) q: f32,                        // across the ribbon, -1..1
+  @location(1) col: vec3f,
+  @location(2) vz: f32,
+};
+
+fn engineColor(j: u32) -> vec3f {
+  let li = floor(fract(fract(f32(j) * 0.618 + 0.13) * 5.31) * 4.0); // the ship's livery (veg.wgsl)
+  if (li < 1.0) { return vec3f(0.3, 0.8, 1.0); }
+  if (li < 2.0) { return vec3f(1.0, 0.55, 0.2); }
+  if (li < 3.0) { return vec3f(1.0, 0.35, 0.75); }
+  return vec3f(0.45, 1.0, 0.85);
+}
+
+@vertex
+fn vsTrail(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> TO {
+  var o: TO;
+  o.pos = vec4f(0.0, 0.0, -2.0, 1.0);
+  o.q = 0.0;
+  o.col = vec3f(0.0);
+  o.vz = 1.0;
+  let j = ii / 2u;
+  let side = f32(ii & 1u) * 2.0 - 1.0;
+  let seg = vi / 2u;
+  let across = f32(vi & 1u) * 2.0 - 1.0;
+  let ps = shipPass(j, time());
+  let age = f32(seg) / f32(FX_TRAIL_SEG) * SHIP_TRAIL;
+  let tau = ps.y - age;
+  if (tau < 0.0 || tau > SHIP_PASS) { return o; }
+  // nozzle position at that moment, from the ship's frame then; the two plumes drift together and
+  // merge within a few seconds (twin ribbons that stayed apart would seem to cross wherever the
+  // view lines their offset up with the path)
+  let fr = bankFrame(shipOrient(j, ps.x, tau));
+  let e = shipEngine(j);
+  let merge = 1.0 - smoothstep(0.4, 3.0, age);
+  let p = shipPos(j, ps.x, tau) + fr * vec3f(e.x * side * merge, e.y, e.z);
+  let rel = toRel(p);
+  let dist = length(rel);
+  // ribbon across the path, facing the camera; a little wider far away so it stays a line
+  let side3 = normalize(cross(fr[2], rel / dist) + vec3f(0.0, 1e-4, 0.0));
+  let hauler = j >= SHIP_FIGHTERS;
+  let w0 = select(0.35, 0.6, hauler);
+  let wdt = w0 + 0.45 * age + dist * 0.0009;
+  let c = F.viewProjNJ * vec4f(rel + side3 * (across * wdt), 1.0);
+  if (c.w < 0.5) { return o; }
+  // brightness: hot at the nozzle, cooling and fading, the trail spread over its width
+  let hot = exp(-age / 0.25);
+  let cool = exp(-age / 2.2) * (1.0 - smoothstep(SHIP_TRAIL - 2.0, SHIP_TRAIL, age));
+  let thr = shipThrust(tau);
+  let ec = engineColor(j);
+  var col = (mix(ec, vec3f(1.0, 0.97, 0.92), hot) * (0.6 + 2.4 * hot) + ec * 0.6 * cool) * cool * (0.5 + thr);
+  col *= w0 / wdt;                                // the same light spread over a wider ribbon
+  col *= 0.6 + 0.4 * merge;                       // merged plumes overlap: don't double up
+  col *= 2.6 * exp(-dist / 7000.0);               // haze
+  col *= smoothstep(0.0, 0.15, age);              // starts just behind the nozzle glow
+  o.pos = c;
+  o.q = across;
+  o.col = col;
+  o.vz = c.w;
+  return o;
+}
+
+@fragment
+fn fsTrail(in: TO) -> @location(0) vec4f {
+  let ip = vec2i(in.pos.xy * F.outSize.zw * F.screen.xy);
+  let sz = viewZ(textureLoad(sceneDepth, ip, 0));
+  let soft = sat((sz - in.vz) / 4.0);
+  let fall = exp(-in.q * in.q * 3.0);
   return vec4f(in.col * fall * soft, 0.0);
 }

@@ -123,20 +123,35 @@ export class Renderer {
   async init(progress: (f: number, m: string) => void) {
     const { device } = this.ctx;
     this.writeStaticFrame();
-    progress(0.02, 'Compiling shaders');
-    await this.atmo.init();
-    this.atmo.precompute();
-    await this.terrain.generate(progress);
-    await this.terrain.initRender('rgba16float');
-    await this.post.init(this.ctx.worldBGL);
-    await this.water.init();
-    await this.vol.init();
-    progress(0.95, 'Growing flora');
-    await this.veg.init(buildMarks((x, z) => this.terrain.heightAt(x, z)));
-    await this.grass.init();
-    progress(0.97, 'Waking the wildlife');
-    await this.fauna.init();
-    await this.fx.init();
+    // A first visit spends most of its load compiling shaders (the browser caches them for later
+    // visits), and the GPU process compiles pipelines on worker threads. So every subsystem builds
+    // its pipelines at once, while the terrain generates; only plant placement waits for the
+    // terrain's heights (measured on a cold shader cache: 3.6 s for all of it, 15 s when run one
+    // after another). Progress runs to 0.86 (main.ts adds the warm-up frames); each task weighs
+    // the time its completion added in that measurement (s), and the label is the first
+    // unfinished task's.
+    const W = [0.42, 1.14, 1.58, 0.31, 0.19];
+    const label = ['Compiling shaders', 'Shaping continents', 'Gathering clouds', 'Growing flora', 'Waking the wildlife'];
+    const frac = [0, 0, 0, 0, 0];
+    const report = () => {
+      let all = 0, got = 0, m = 'Warming up';
+      for (let i = W.length - 1; i >= 0; i--) {
+        all += W[i];
+        got += W[i] * frac[i];
+        if (frac[i] < 1) m = label[i];
+      }
+      progress(0.02 + (0.84 * got) / all, m);
+    };
+    const task = (i: number, p: Promise<unknown>) => p.then(() => { frac[i] = 1; report(); });
+    report();
+    const terrain = this.terrain.generate((f, m) => { frac[1] = Math.min(f / 0.92, 0.99); label[1] = m; report(); });
+    await Promise.all([
+      task(0, this.atmo.init().then(() => this.atmo.precompute())),
+      task(1, terrain),
+      task(2, Promise.all([this.terrain.initRender('rgba16float'), this.post.init(this.ctx.worldBGL), this.water.init(), this.vol.init()])),
+      task(3, Promise.all([this.veg.init(terrain.then(() => buildMarks((x, z) => this.terrain.heightAt(x, z)))), this.grass.init()])),
+      task(4, Promise.all([this.fauna.init(), this.fx.init()])),
+    ]);
     this.shadowTex = tex2d(device, SHADOW_SIZE, SHADOW_SIZE, 'depth32float', T.RENDER_ATTACHMENT | T.TEXTURE_BINDING, 'shadow', 1, CASCADES);
     // clear shadow layers once (until casters exist)
     {
@@ -162,6 +177,11 @@ export class Renderer {
       { binding: 9, resource: this.terrain.fTex.createView() },
       { binding: 10, resource: this.terrain.tTex.createView() },
     ] });
+    {
+      const enc = device.createCommandEncoder();
+      this.fauna.encodeTable(enc, this.worldBG);
+      device.queue.submit([enc.finish()]);
+    }
     this.lightBG = device.createBindGroup({ layout: this.ctx.lightBGL, entries: [
       { binding: 0, resource: this.shadowTex.createView({ dimension: '2d-array' }) },
     ] });
@@ -171,7 +191,6 @@ export class Renderer {
         depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
     }
     this.recordBundles();
-    progress(1, 'Ready');
   }
 
   private recordBundles() {

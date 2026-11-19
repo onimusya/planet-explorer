@@ -33,6 +33,7 @@ fn valleyWorld(uv: vec2f) -> vec2f {
   return p;
 }
 
+
 // The herd trail is a stadium-shaped loop in valley coordinates: two lanes HERD.w either side of
 // v = HERD.y, from u = HERD.x - HERD.z to HERD.x + HERD.z, joined by U-turns of radius HERD.w.
 // Signed distance to the trail line, negative inside the loop.
@@ -45,21 +46,25 @@ fn trailDist(uv: vec2f) -> f32 { return abs(trailSD(uv)); }
 
 fn trailLength() -> f32 { return 4.0 * HERD.z + TAU * HERD.w; }
 
-// Point (xy) and unit direction (zw) in valley coordinates at arc length s along the loop.
-fn herdPath(s: f32) -> vec4f {
-  let len = trailLength();
+// Point (xy) and unit direction (zw) at arc length s along a stadium loop of half length hl and
+// turn radius r, in coordinates centred on the loop: the first straight runs at y = -r toward +x.
+fn stadium(s: f32, hl: f32, r: f32) -> vec4f {
+  let len = 4.0 * hl + TAU * r;
   var x = s - len * floor(s / len);
-  let lane = 2.0 * HERD.z;
-  let turn = PI * HERD.w;
-  if (x < lane) { return vec4f(HERD.x - HERD.z + x, HERD.y - HERD.w, 1.0, 0.0); }
+  let lane = 2.0 * hl;
+  let turn = PI * r;
+  if (x < lane) { return vec4f(x - hl, -r, 1.0, 0.0); }
   x -= lane;
   if (x < turn) {
-    let a = x / HERD.w;
-    return vec4f(HERD.x + HERD.z + HERD.w * sin(a), HERD.y - HERD.w * cos(a), cos(a), sin(a));
+    let a = x / r;
+    return vec4f(hl + r * sin(a), -r * cos(a), cos(a), sin(a));
   }
   x -= turn;
-  if (x < lane) { return vec4f(HERD.x + HERD.z - x, HERD.y + HERD.w, -1.0, 0.0); }
+  if (x < lane) { return vec4f(hl - x, r, -1.0, 0.0); }
   x -= lane;
-  let a = x / HERD.w;
-  return vec4f(HERD.x - HERD.z - HERD.w * sin(a), HERD.y + HERD.w * cos(a), -cos(a), -sin(a));
+  let a = x / r;
+  return vec4f(-hl - r * sin(a), r * cos(a), -cos(a), -sin(a));
 }
+
+// Point (xy) and unit direction (zw) in valley coordinates at arc length s along the herd's loop.
+fn herdPath(s: f32) -> vec4f { return stadium(s, HERD.z, HERD.w) + vec4f(HERD.xy, 0.0, 0.0); }

@@ -69,9 +69,49 @@ export class Vegetation {
 
   constructor(private ctx: Ctx) {}
 
-  async init(marks: Float32Array) {
+  // marks: hand-placed landmark instances, which need the generated terrain. The pipelines start
+  // compiling first, so they build while the meshes are generated and the terrain finishes.
+  async init(marksP: Promise<Float32Array>) {
     const { device } = this.ctx;
-    // ---- meshes ----
+    // ---- pipelines ----
+    const C = GPUShaderStage.COMPUTE;
+    const cl = bgl(device, [L.uniform(0, C), L.storageRO(1, C), L.storage(2), L.storage(3), L.storageRO(4, C), L.storage(5), L.storageRO(6, C)]);
+    const fb = this.ctx.frameBGL, wb = this.ctx.worldBGL;
+    const [cmod, vmod] = await Promise.all([this.ctx.module(cullSrc, 'veg_cull'), this.ctx.module(vegSrc, 'veg')]);
+    const cullP = Promise.all([
+      computePipe(device, cmod, 'reset', [fb, wb, cl]),
+      computePipe(device, cmod, 'cull', [fb, wb, cl]),
+      computePipe(device, cmod, 'cullMarks', [fb, wb, cl]),
+      computePipe(device, cmod, 'finalize', [fb, wb, cl]),
+    ]);
+    this.cascadeBGL = bgl(device, [L.uniform(0, GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT)]);
+    const vbl: GPUVertexBufferLayout[] = [
+      { arrayStride: STRIDE, attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+        { shaderLocation: 1, offset: 12, format: 'snorm8x4' },
+        { shaderLocation: 2, offset: 16, format: 'unorm16x2' },
+        { shaderLocation: 3, offset: 20, format: 'unorm8x4' },
+      ] },
+      { arrayStride: 32, stepMode: 'instance', attributes: [
+        { shaderLocation: 4, offset: 0, format: 'float32x4' },
+        { shaderLocation: 5, offset: 16, format: 'float32x4' },
+      ] },
+    ];
+    const mainLayout = device.createPipelineLayout({ bindGroupLayouts: [fb, wb, this.ctx.lightBGL, this.cascadeBGL] });
+    const shLayout = device.createPipelineLayout({ bindGroupLayouts: [fb, this.ctx.emptyBGL, this.ctx.emptyBGL, this.cascadeBGL] });
+    const depth: GPUDepthStencilState = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'greater' };
+    const shDepth: GPUDepthStencilState = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5, depthBiasClamp: 0.01 };
+    const drawP = Promise.all([
+      device.createRenderPipelineAsync({ label: 'vegOpaque', layout: mainLayout, vertex: { module: vmod, entryPoint: 'vs', buffers: vbl },
+        fragment: { module: vmod, entryPoint: 'fsOpaque', targets: [{ format: 'rgba16float' }] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth }),
+      device.createRenderPipelineAsync({ label: 'vegCut', layout: mainLayout, vertex: { module: vmod, entryPoint: 'vs', buffers: vbl },
+        fragment: { module: vmod, entryPoint: 'fsCutout', targets: [{ format: 'rgba16float' }] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth }),
+      device.createRenderPipelineAsync({ label: 'vegShadow', layout: shLayout, vertex: { module: vmod, entryPoint: 'vsShadow', buffers: vbl },
+        primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: shDepth }),
+      device.createRenderPipelineAsync({ label: 'vegShadowCut', layout: shLayout, vertex: { module: vmod, entryPoint: 'vsShadow', buffers: vbl },
+        fragment: { module: vmod, entryPoint: 'fsShadowCut', targets: [] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: shDepth }),
+    ]);
+    // ---- meshes ---- (generated while the pipelines compile)
     const meshes: MeshRec[][][] = [];
     const parts: MeshBuilder[] = [];
     let vcount = 0;
@@ -178,20 +218,11 @@ export class Vegetation {
       cd[o + 12] = shBase[s]; cd[o + 13] = sd.sink; cd[o + 14] = sd.ystretch; cd[o + 15] = sd.cy ?? 0.6;
     }
     cd[INFO] = SPECIES.length; cd[INFO + 1] = nd; cd[INFO + 2] = 1;
+    const marks = await marksP;
     this.nMarks = marks.length / 8;
     this.marksBuf = bufferWith(device, marks.length ? marks : new Float32Array(8), U.STORAGE, 'vegMarks');
 
-    // ---- pipelines ----
-    const C = GPUShaderStage.COMPUTE;
-    const cl = bgl(device, [L.uniform(0, C), L.storageRO(1, C), L.storage(2), L.storage(3), L.storageRO(4, C), L.storage(5), L.storageRO(6, C)]);
-    const cmod = await this.ctx.module(cullSrc, 'veg_cull');
-    const fb = this.ctx.frameBGL, wb = this.ctx.worldBGL;
-    [this.pReset, this.pCull, this.pMarks, this.pFinal] = await Promise.all([
-      computePipe(device, cmod, 'reset', [fb, wb, cl]),
-      computePipe(device, cmod, 'cull', [fb, wb, cl]),
-      computePipe(device, cmod, 'cullMarks', [fb, wb, cl]),
-      computePipe(device, cmod, 'finalize', [fb, wb, cl]),
-    ]);
+    [this.pReset, this.pCull, this.pMarks, this.pFinal] = await cullP;
     this.cullBG = device.createBindGroup({ layout: cl, entries: [
       { binding: 0, resource: { buffer: this.cullU } },
       { binding: 1, resource: { buffer: this.listsBuf } },
@@ -201,38 +232,11 @@ export class Vegetation {
       { binding: 5, resource: { buffer: this.indirect } },
       { binding: 6, resource: { buffer: this.marksBuf } },
     ] });
-    this.cascadeBGL = bgl(device, [L.uniform(0, GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT)]);
     for (let c = 0; c < 4; c++) {
       const u = bufferWith(device, new Uint32Array([c, 0, 0, 0]), U.UNIFORM);
       this.cascadeBG.push(device.createBindGroup({ layout: this.cascadeBGL, entries: [{ binding: 0, resource: { buffer: u } }] }));
     }
-    const vmod = await this.ctx.module(vegSrc, 'veg');
-    const vbl: GPUVertexBufferLayout[] = [
-      { arrayStride: STRIDE, attributes: [
-        { shaderLocation: 0, offset: 0, format: 'float32x3' },
-        { shaderLocation: 1, offset: 12, format: 'snorm8x4' },
-        { shaderLocation: 2, offset: 16, format: 'unorm16x2' },
-        { shaderLocation: 3, offset: 20, format: 'unorm8x4' },
-      ] },
-      { arrayStride: 32, stepMode: 'instance', attributes: [
-        { shaderLocation: 4, offset: 0, format: 'float32x4' },
-        { shaderLocation: 5, offset: 16, format: 'float32x4' },
-      ] },
-    ];
-    const mainLayout = device.createPipelineLayout({ bindGroupLayouts: [fb, wb, this.ctx.lightBGL, this.cascadeBGL] });
-    const shLayout = device.createPipelineLayout({ bindGroupLayouts: [fb, this.ctx.emptyBGL, this.ctx.emptyBGL, this.cascadeBGL] });
-    const depth: GPUDepthStencilState = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'greater' };
-    const shDepth: GPUDepthStencilState = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5, depthBiasClamp: 0.01 };
-    [this.pOpaque, this.pCut, this.pShadow, this.pShadowCut] = await Promise.all([
-      device.createRenderPipelineAsync({ label: 'vegOpaque', layout: mainLayout, vertex: { module: vmod, entryPoint: 'vs', buffers: vbl },
-        fragment: { module: vmod, entryPoint: 'fsOpaque', targets: [{ format: 'rgba16float' }] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth }),
-      device.createRenderPipelineAsync({ label: 'vegCut', layout: mainLayout, vertex: { module: vmod, entryPoint: 'vs', buffers: vbl },
-        fragment: { module: vmod, entryPoint: 'fsCutout', targets: [{ format: 'rgba16float' }] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth }),
-      device.createRenderPipelineAsync({ label: 'vegShadow', layout: shLayout, vertex: { module: vmod, entryPoint: 'vsShadow', buffers: vbl },
-        primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: shDepth }),
-      device.createRenderPipelineAsync({ label: 'vegShadowCut', layout: shLayout, vertex: { module: vmod, entryPoint: 'vsShadow', buffers: vbl },
-        fragment: { module: vmod, entryPoint: 'fsShadowCut', targets: [] }, primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: shDepth }),
-    ]);
+    [this.pOpaque, this.pCut, this.pShadow, this.pShadowCut] = await drawP;
   }
 
   // Debug: read back visible instance counts per (species, variant, lod) list.

@@ -27,7 +27,7 @@ if ($Reload) {
   agent-browser --session $S set viewport 1920 1080 2>&1 | Out-Null
   Start-Sleep -Seconds 1
 }
-$js = "(() => { const p = window.__pe; p.overlay(" + ($(if ($Hud) { "true" } else { "false" })) + ");"
+$js = "(() => { const p = window.__pe; if (p.enter) p.enter(); p.overlay(" + ($(if ($Hud) { "true" } else { "false" })) + ");"
 if (-not $ShowHelp) { $js += " document.getElementById('help').style.opacity = '0';" }
 if ($View -ge 0) { $js += " p.view($View);" }
 if ($Pose -ne "") { $js += " p.pose($Pose);" }

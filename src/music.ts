@@ -1,10 +1,12 @@
 // Ambient soundtrack: one looping track per destination region (Arrival Vista, which also covers
 // the open country between destinations, Bioluminescent Valley, Monumental Highlands), crossfaded
 // as the camera crosses region borders. The tracks are ElevenLabs-generated MP3s in public/audio
-// (scripts/music.mjs). They are fetched after the first frame, so they never delay it, and each
-// is decoded the first time its region is entered (off the main thread), made loopable in small
-// slices between frames, and kept for later visits.
-// Browsers keep audio off until the first click or key press; missing files just mean silence.
+// (scripts/music.mjs). They are fetched while the world is built (no other downloads compete),
+// and each is decoded the first time its region is entered (off the main thread), made loopable
+// in small slices between frames, and kept for later visits.
+// Browsers keep audio off until a click or key press: the preloader's "click to explore" starts
+// it (unlock), or else the first gesture after a script dismissed it (arm). Missing files just
+// mean silence.
 // update() runs every frame and allocates nothing: Web Audio is touched only on region changes.
 import { VALLEY_A, VALLEY_B, HIGHLANDS_C, WORLD_L } from './world';
 
@@ -49,7 +51,7 @@ export class Music {
   private loop: number[] = []; // loop start, end and track length (s) of the playing track
   on = true;
 
-  // Fetch the tracks in the background and arm the audio unlock on the first user gesture.
+  // Fetch the tracks in the background (while the world is built, behind the preloader).
   load() {
     TRACKS.forEach((name, i) => {
       fetch(`audio/${name}.mp3`)
@@ -57,22 +59,32 @@ export class Music {
         .then((b) => { this.enc[i] = b; })
         .catch(() => {});
     });
-    const unlock = () => {
-      removeEventListener('pointerdown', unlock, true);
-      removeEventListener('keydown', unlock, true);
-      const ac = new AudioContext();
-      this.master = ac.createGain();
-      this.master.gain.value = this.on ? VOLUME : 0;
-      this.master.connect(ac.destination);
-      this.ac = ac;
-    };
-    addEventListener('pointerdown', unlock, true);
-    addEventListener('keydown', unlock, true);
     document.addEventListener('visibilitychange', () => {
       if (!this.ac) return;
       if (document.hidden) void this.ac.suspend();
       else if (this.on) void this.ac.resume();
     });
+  }
+
+  // Start the audio. Call from a user gesture (the preloader's click), which browsers require.
+  unlock() {
+    if (this.ac) return;
+    const ac = new AudioContext();
+    this.master = ac.createGain();
+    this.master.gain.value = this.on ? VOLUME : 0;
+    this.master.connect(ac.destination);
+    this.ac = ac;
+  }
+
+  // No gesture to hand (the preloader was dismissed by a script): unlock on the next one.
+  arm() {
+    const once = () => {
+      removeEventListener('pointerdown', once, true);
+      removeEventListener('keydown', once, true);
+      this.unlock();
+    };
+    addEventListener('pointerdown', once, true);
+    addEventListener('keydown', once, true);
   }
 
   toggle() {

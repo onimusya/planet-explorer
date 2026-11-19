@@ -102,7 +102,9 @@ const vistaF = az(16, 190, ...VISTA_CAM); // ~50 m above the vista camera, just 
 // The valley kettle follows the herd along its trail (fauna.wgsl), ~36 m above the clearing's
 // floor and clear of the mushroom caps; its x, z here is only the middle of the trail.
 const valleyF = herdPt(HERD[0], HERD[1]);
-const highCam: [number, number] = [HIGHLANDS_C[0] - 1200, HIGHLANDS_C[1] + 250];
+// Monumental Highlands destination camera (main.ts): above a mesa prow on the west rim, 600 m up.
+export const HIGH_CAM: [number, number] = [HIGHLANDS_C[0] - 1200, HIGHLANDS_C[1] + 250];
+const highCam = HIGH_CAM;
 const highF = az(72, 230, ...highCam); // ~25 m above the highland camera
 export const FLOCKS = [
   [vistaF[0], vistaF[1], 232, 45],
@@ -110,9 +112,47 @@ export const FLOCKS = [
   [highF[0], highF[1], 625, 40],
 ] as const;
 export const FLOCK_SCALE = [2.6, 1.4, 2.2] as const;
+
+// More life (fauna.wgsl). Pose slots follow the herd and the flocks, in this order:
+export const FAUNA_NT = 3; // titans: long-necked giants grazing the Highlands mesa
+export const FAUNA_NH = 4; // travellers in exosuits: two on the Vista shelf, two following the herd
+export const FAUNA_NK = 2; // colossi: giant humanoid walkers on the Highlands mesa
+export const FAUNA_NJ = 14; // sky jellies drifting over the herd's clearing
+export const FAUNA_NR = 2; // great sky rays soaring over the plain below the Vista
+export const FAUNA_NS = 9; // starships: three per destination (SHIP_LANES)
+export const FAUNA_OT = FAUNA_NC + FAUNA_NB;
+export const FAUNA_OH = FAUNA_OT + FAUNA_NT;
+export const FAUNA_OK = FAUNA_OH + FAUNA_NH;
+export const FAUNA_OJ = FAUNA_OK + FAUNA_NK;
+export const FAUNA_OR = FAUNA_OJ + FAUNA_NJ;
+export const FAUNA_OS = FAUNA_OR + FAUNA_NR;
+export const FAUNA_N = FAUNA_OS + FAUNA_NS;
+// The herd trail's world positions, tabulated once at startup (fauna.wgsl trailTable): samples
+// along the loop (~0.5 m apart), each with points across it every 2 m from 6 m right to 6 m left.
+export const HERD_TAB_NS = 480, HERD_TAB_NL = 7;
+// Walking loops are stadiums (like the herd trail): centre x, z, half length, turn radius, with
+// the straight lanes along `across` (perpendicular to the camera's line of sight to the centre).
+const D = (deg: number): [number, number] => [Math.cos(deg * D2R), Math.sin(deg * D2R)];
+export const TITAN_LOOP = [...az(84, 470, ...highCam), 80, 40] as const; // mesa top at ~466 m
+export const TITAN_AX = D(84);
+export const COLOSSUS_LOOP = [...az(88, 590, ...highCam), 60, 25] as const;
+export const COLOSSUS_AX = D(88);
+// Travellers on the Vista shelf (175 m): one standing near the edge, one pacing along it.
+export const TRAVELLER_SPOTS = [6001.3, 9261.5, 6005.2, 9261.0, 6011.7, 9262.2] as const;
+// Sky jellies drift over the herd's clearing; sky rays circle above the plain below the Vista.
+export const JELLY_C = herdPt(HERD[0], HERD[1]);
+export const RAY_C = [...az(14, 290, ...VISTA_CAM), 280, 125] as const; // x, z, altitude, radius
+// Starship lanes: a destination camera's x, y, z and view azimuth (deg). Every pass crosses the
+// view of its lane's camera: it descends from high up, flies over, then climbs out of sight.
+export const SHIP_LANES = [
+  [VISTA_CAM[0], 179, VISTA_CAM[1], 18],
+  [JELLY_C[0], 34, JELLY_C[1], Math.atan2(0.8979, 0.4171) / D2R], // along the valley (herdPt's u)
+  [highCam[0], 600, highCam[1], 75],
+] as const;
 // Airborne particles: luminous spores over the valley floor, sunlit pollen motes elsewhere.
 export const FX_SPORES = 16384;
 export const FX_MOTES = 8192;
+export const FX_TRAIL_SEG = 40; // segments per starship engine trail (fx.wgsl vsTrail)
 
 const f = (x: number) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 const v2 = (a: readonly number[]) => `vec2f(${f(a[0])}, ${f(a[1])})`;
@@ -157,7 +197,32 @@ export function wgslPrelude(): string {
     `const FLOCK2: vec4f = ${v4(FLOCKS[2])};`,
     `const FX_SPORES: u32 = ${FX_SPORES}u;`,
     `const FX_MOTES: u32 = ${FX_MOTES}u;`,
+    `const FX_TRAIL_SEG: u32 = ${FX_TRAIL_SEG}u;`,
     `const FLOCK_SCALE: vec3f = vec3f(${FLOCK_SCALE.map(f).join(', ')});`,
+    `const FAUNA_NT: u32 = ${FAUNA_NT}u;`,
+    `const FAUNA_NH: u32 = ${FAUNA_NH}u;`,
+    `const FAUNA_NK: u32 = ${FAUNA_NK}u;`,
+    `const FAUNA_NJ: u32 = ${FAUNA_NJ}u;`,
+    `const FAUNA_NR: u32 = ${FAUNA_NR}u;`,
+    `const FAUNA_NS: u32 = ${FAUNA_NS}u;`,
+    `const FAUNA_OT: u32 = ${FAUNA_OT}u;`,
+    `const FAUNA_OH: u32 = ${FAUNA_OH}u;`,
+    `const FAUNA_OK: u32 = ${FAUNA_OK}u;`,
+    `const FAUNA_OJ: u32 = ${FAUNA_OJ}u;`,
+    `const FAUNA_OR: u32 = ${FAUNA_OR}u;`,
+    `const FAUNA_OS: u32 = ${FAUNA_OS}u;`,
+    `const FAUNA_N: u32 = ${FAUNA_N}u;`,
+    `const HERD_TAB_NS: u32 = ${HERD_TAB_NS}u;`,
+    `const HERD_TAB_NL: u32 = ${HERD_TAB_NL}u;`,
+    `const TITAN_LOOP: vec4f = ${v4(TITAN_LOOP)};`,
+    `const TITAN_AX: vec2f = ${v2(TITAN_AX)};`,
+    `const COLOSSUS_LOOP: vec4f = ${v4(COLOSSUS_LOOP)};`,
+    `const COLOSSUS_AX: vec2f = ${v2(COLOSSUS_AX)};`,
+    `const TRAVELLER_A: vec4f = ${v4(TRAVELLER_SPOTS.slice(0, 4))};`,
+    `const TRAVELLER_B: vec2f = ${v2(TRAVELLER_SPOTS.slice(4, 6))};`,
+    `const JELLY_C: vec2f = ${v2(JELLY_C)};`,
+    `const RAY_C: vec4f = ${v4(RAY_C)};`,
+    ...SHIP_LANES.map((l, i) => `const SHIP_LANE${i}: vec4f = ${v4(l)};`),
     '',
   ].join('\n');
 }

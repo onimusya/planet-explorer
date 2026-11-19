@@ -2,7 +2,7 @@
 # Usage: scripts\ev.ps1 -Js "p.view(0); return p.cam()" [-Shot NAME] [-Wait 3]
 param([string]$Js = "return 1", [string]$Shot = "", [double]$Wait = 3)
 $root = Split-Path -Parent $PSScriptRoot
-$code = "(() => { const p = window.__pe; p.overlay(false); document.getElementById('help').style.opacity = '0'; $Js })()"
+$code = "(() => { const p = window.__pe; if (p.enter) p.enter(); p.overlay(false); document.getElementById('help').style.opacity = '0'; $Js })()"
 # Windows PowerShell 5 drops embedded double quotes when calling native executables
 $code = $code.Replace('"', '\"')
 $r = agent-browser --session planet eval $code 2>&1 | Select-Object -Last 1

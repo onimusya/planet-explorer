@@ -9,13 +9,18 @@ import { PASS_NAMES } from './metrics';
 import { clock, DT, TIME, FRAME_MS, CPU_MS } from './clock';
 import { Music } from './music';
 import {
-  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGHLANDS_C, LAKE_C, WORLD_L, valleyFraming,
+  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGH_CAM, LAKE_C, WORLD_L, valleyFraming,
 } from './world';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
 const loadEl = document.getElementById('load') as HTMLDivElement;
-const msgEl = document.getElementById('msg') as HTMLDivElement;
+const progEl = document.getElementById('prog') as HTMLElement;
+const msgEl = document.getElementById('msg') as HTMLElement;
+const pctEl = document.getElementById('pct') as HTMLElement;
 const barEl = document.querySelector('#bar i') as HTMLElement;
+const goEl = document.getElementById('go') as HTMLButtonElement;
+const tipBox = document.getElementById('tip') as HTMLElement;
+const tipEl = document.querySelector('#tip span') as HTMLElement;
 const helpEl = document.getElementById('help') as HTMLElement;
 const errEl = document.getElementById('err') as HTMLDivElement;
 
@@ -26,16 +31,76 @@ function fail(e: unknown) {
   msgEl.textContent = 'FAILED';
 }
 
+// --- preloader (index.html): real progress from the renderer's init steps, rotating tips ---
+const loadLog: [number, number, string][] = []; // ms since navigation, percent, step (debug API)
+const progress = (f: number, m: string) => {
+  const pc = Math.round(f * 100);
+  loadLog.push([Math.round(performance.now()), pc, m]);
+  barEl.style.width = pc + '%';
+  pctEl.textContent = pc + '%';
+  progEl.setAttribute('aria-valuenow', String(pc));
+  msgEl.textContent = m.toUpperCase();
+};
+const TIPS = [
+  'Press 1, 2 or 3 to fly between the Arrival Vista, the Bioluminescent Valley and the Monumental Highlands.',
+  'Click to capture the mouse, then roam with W A S D. Hold Shift to boost, use the wheel to set your speed.',
+  'Starships cross the sky about once a minute, trailing their engine glow. Look up.',
+  'In the Valley a glowing herd grazes from clearing to clearing, with sky jellies drifting overhead.',
+  'Long-necked titans and stone colossi walk the mesa tops of the Highlands.',
+  'Everything you see is generated in your browser. No textures or models are downloaded.',
+  'Press N to switch the music off or on, M for the performance overlay.',
+];
+let tipI = Math.floor(Math.random() * TIPS.length);
+tipEl.textContent = TIPS[tipI];
+const tipTimer = setInterval(() => {
+  tipBox.style.opacity = '0';
+  setTimeout(() => {
+    tipI = (tipI + 1) % TIPS.length;
+    tipEl.textContent = TIPS[tipI];
+    tipBox.style.opacity = '1';
+  }, 650);
+}, 5600);
+// The world is revealed only after it has rendered behind the preloader for a moment (shadows,
+// temporal filters and adaptive resolution settled), so the first frame seen is a finished one.
+const WARM_FRAMES = 45;
+const WARM_MS = 800;
+
 // Destination poses: x, y, z, dirX, dirY, dirZ (heights resolved after terrain generation)
 const POSES = new Float64Array(4 * 6);
 
 async function main() {
+  const music = new Music();
+  music.load();
+  // Gate: 0 building the world, 1 warming up behind the preloader, 2 waiting for the click or key
+  // press that reveals it, 3 revealed. Until then the game sees no keys.
+  let gate = 0;
+  const enter = (gesture: boolean) => {
+    if (gate === 3) return;
+    gate = 3;
+    if (gesture) music.unlock(); else music.arm();
+    clearInterval(tipTimer);
+    loadEl.classList.add('out');
+    // the faded preloader must not stay layered over the canvas
+    const hide = () => { loadEl.style.display = 'none'; };
+    loadEl.addEventListener('transitionend', (e) => { if (e.target === loadEl) hide(); });
+    setTimeout(hide, 2000);
+  };
+  loadEl.addEventListener('click', () => { if (gate === 2) enter(true); });
+  addEventListener('keydown', (e) => {
+    if (gate === 3) return;
+    e.stopPropagation();
+    // keys that count as a user gesture for audio (not Esc, modifiers or function keys)
+    if (gate === 2 && !e.repeat && (e.key.length === 1 || e.key === 'Enter')) enter(true);
+  }, true);
+
   const gpu = await initGpu(canvas);
   const ctx = createCtx(gpu);
   const camera = new Camera();
   const input = new Input(canvas);
   const r = new Renderer(ctx, camera);
-  await r.init((f, m) => { barEl.style.width = (f * 100).toFixed(0) + '%'; msgEl.textContent = m.toUpperCase(); });
+  await r.init(progress);
+  progress(0.86, 'Warming up');
+  gate = 1;
   const ground = (x: number, z: number) => Math.max(r.terrain.heightAt(x, z), 0);
   camera.ground = r.terrain;
 
@@ -64,7 +129,7 @@ async function main() {
     // B. Bioluminescent Valley: see valleyPose()
     valleyPose(0);
     // C. Monumental Highlands: above a mesa prow on the west rim, looking east-north-east along the canyon
-    const hx = HIGHLANDS_C[0] - 1200, hz = HIGHLANDS_C[1] + 250;
+    const [hx, hz] = HIGH_CAM;
     setPose(2, hx, Math.max(600, ground(hx, hz) + 40), hz, ...dirAz(75, -12));
     void LAKE_C;
   }
@@ -211,10 +276,9 @@ async function main() {
 
   // Frame-loop scalars live in typed arrays, not closure variables: a fractional number stored
   // in a closure variable is boxed into a new heap object (see clock.ts).
-  const lt = new Float64Array(4); // previous rAF timestamp, frame start, quality timer, HUD timer
+  const lt = new Float64Array(5); // previous rAF timestamp, frame start, quality timer, HUD timer, warm-up start
   lt[0] = performance.now();
-  let started = false;
-  const music = new Music();
+  let warm = 0; // frames rendered behind the preloader
   const loop = (now: number) => {
     requestAnimationFrame(loop);
     // CPU time is taken only while the overlay or the benchmark reports it: every
@@ -226,12 +290,16 @@ async function main() {
     clock[DT] = Math.min(Math.max(clock[FRAME_MS] / 1000, 0), 0.1);
     clock[TIME] = now / 1000;
     const dt = clock[DT];
-    if (!started) {
-      started = true;
-      loadEl.style.opacity = '0';
-      // the faded loader must not stay layered over the canvas
-      loadEl.addEventListener('transitionend', () => { loadEl.style.display = 'none'; }, { once: true });
-      music.load(); // after the first frame, so the soundtrack never delays it
+    if (gate === 1) {
+      if (warm === 0) lt[4] = now;
+      warm++;
+      if (warm === 20) progress(0.93, 'Warming up');
+      if (warm >= WARM_FRAMES && now - lt[4] >= WARM_MS) {
+        gate = 2;
+        progress(1, 'Ready');
+        loadEl.classList.add('ready');
+        goEl.focus({ preventScroll: true });
+      }
     }
     if (canvas.width !== wantW || canvas.height !== wantH) {
       canvas.width = wantW; canvas.height = wantH;
@@ -292,11 +360,16 @@ async function main() {
     volDebug: (m: number) => { r.vol.debug = m; },
     passMs: () => Array.from(r.metrics.passMs),
     music: () => music.state(),
+    enter: () => enter(false), // dismiss the preloader (audio then waits for the next gesture)
+    gate: () => gate,
+    loadLog: () => loadLog,
     frames: () => r.frame,
     renderer: r, // for scripts/heap-sample.mjs --app (probes the app's own pass descriptors)
     info: () => ({ adapter: gpu.adapterName, timestamps: gpu.timestamps, textureViews: gpu.textureViews, internal: [r.iw, r.ih], out: [r.t.outW, r.t.outH], worldL: WORLD_L }),
   };
   (window as unknown as Record<string, unknown>).__pe = api;
+  // ?bench=1 (or ?gate=0) skips the preloader's click
+  if (urlp.get('bench') === '1' || urlp.get('gate') === '0') enter(false);
   if (urlp.get('bench') === '1') setTimeout(() => api.bench(), 2500);
 }
 
