@@ -59,6 +59,8 @@ function minifyWgsl(src: string): string {
 
 export default defineConfig({
   plugins: [wgsl()],
+  // relative asset URLs: the build runs from any path, e.g. GitHub Pages' /planet-explorer/
+  base: './',
   build: {
     target: 'es2022',
     modulePreload: false,
