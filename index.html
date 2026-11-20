@@ -96,6 +96,10 @@
   #help kbd { display: inline-block; min-width: 12px; padding: 0 5px; margin-left: 3px; font: 600 10.5px/16px ui-monospace, Consolas, monospace;
     text-align: center; color: #fff; background: rgba(255,255,255,.08); border: 1px solid rgba(190,240,232,.32); border-bottom-width: 2px; border-radius: 4px; }
   #help kbd:first-child { margin-left: 0; }
+  #toast { position: fixed; z-index: 5; left: 50%; top: 36%; transform: translate(-50%, -50%); pointer-events: none; user-select: none;
+    padding-left: .6em; font: 300 22px/1 system-ui, sans-serif; letter-spacing: .6em; color: rgba(232,250,247,.94);
+    text-shadow: 0 0 18px rgba(120,230,220,.5), 0 1px 3px rgba(0,0,0,.5); opacity: 0; transition: opacity .7s; }
+  #toast.on { opacity: 1; }
   #err { position: fixed; z-index: 11; left: 50%; top: 40%; transform: translateX(-50%); max-width: 520px; padding: 18px 22px; display: none;
     font: 14px/1.5 system-ui, sans-serif; color: #fde; background: rgba(40,10,20,.9); border: 1px solid #a45; border-radius: 6px; }
 </style>
@@ -156,6 +160,7 @@
       <dt><kbd>Shift</kbd></dt><dd>Boost</dd>
       <dt><kbd>Wheel</kbd></dt><dd>Flight speed</dd>
       <dt><kbd>Esc</kbd></dt><dd>Release mouse</dd>
+      <dt><kbd>T</kbd></dt><dd>Time of day</dd>
     </dl>
     <dl>
       <dt><kbd>1</kbd></dt><dd>Fly to Arrival Vista</dd>
@@ -170,6 +175,7 @@
     </dl>
   </div>
 </aside>
+<div id="toast" aria-live="polite"></div>
 <div id="err"></div>
 <script type="module" src="/src/main.ts"></script>
 </body>

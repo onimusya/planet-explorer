@@ -20,7 +20,9 @@ export const FO = {
   shadowMats: 116,
   shadowInfo: 180,
   extra: 184,
-  SIZE: 188,
+  sky: 188,
+  skyCol: 192,
+  SIZE: 196,
 } as const;
 
 export const FRAME_BYTES = FO.SIZE * 4;

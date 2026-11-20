@@ -3,6 +3,7 @@ import compositeSrc from './shaders/composite.wgsl';
 import taaSrc from './shaders/taa.wgsl';
 import bloomSrc from './shaders/bloom.wgsl';
 import finalSrc from './shaders/final.wgsl';
+import expoSrc from './shaders/exposure.wgsl';
 import { L, bgl, buffer, bufferWith, computePipe, tex2d, U, T } from './gpu';
 import type { Ctx } from './ctx';
 import { FONT_WORDS } from './font';
@@ -24,6 +25,12 @@ export class Post {
   private pDown!: GPUComputePipeline;
   private pUp!: GPUComputePipeline;
   private pFinal!: GPURenderPipeline;
+  private pHist!: GPUComputePipeline;
+  private pAdapt!: GPUComputePipeline;
+  private lExpo!: GPUBindGroupLayout;
+  private bgExpo!: GPUBindGroup;
+  private histBuf!: GPUBuffer;
+  private expoW = 1; private expoH = 1; // size of the metered bloom level
   private lComp!: GPUBindGroupLayout;
   private lTaa!: GPUBindGroupLayout;
   private lBloom!: GPUBindGroupLayout;
@@ -58,17 +65,21 @@ export class Post {
     this.lBloom = bgl(device, [L.tex(0, 'float', '2d', C), L.stTex(1, 'rgba16float'), L.tex(2, 'float', '2d', C), L.uniform(3, C)]);
     const F = GPUShaderStage.FRAGMENT;
     this.lFinal = bgl(device, [L.tex(0, 'unfilterable-float', '2d', F), L.tex(1, 'float', '2d', F), L.storageRO(2, F), L.storageRO(3, F), L.uniform(4, F), L.storageRO(5, F), L.tex(6, 'unfilterable-float', '2d', F)]);
-    const [mc, mt, mb, mf] = await Promise.all([
+    this.lExpo = bgl(device, [L.tex(0, 'float', '2d', C), L.storage(1), L.storage(2), L.uniform(3, C)]);
+    const [mc, mt, mb, mf, me] = await Promise.all([
       this.ctx.module(compositeSrc, 'composite'),
       this.ctx.module(taaSrc, 'taa'),
       this.ctx.module(bloomSrc, 'bloom'),
       this.ctx.module(finalSrc, 'final'),
+      this.ctx.module(expoSrc, 'exposure'),
     ]);
-    [this.pComp, this.pTaa, this.pDown, this.pUp, this.pFinal] = await Promise.all([
+    [this.pComp, this.pTaa, this.pDown, this.pUp, this.pHist, this.pAdapt, this.pFinal] = await Promise.all([
       computePipe(device, mc, 'main', [fb, worldBGL, this.lComp]),
       computePipe(device, mt, 'main', [fb, this.lTaa]),
       computePipe(device, mb, 'down', [fb, this.lBloom]),
       computePipe(device, mb, 'up', [fb, this.lBloom]),
+      computePipe(device, me, 'hist', [fb, this.lExpo]),
+      computePipe(device, me, 'adapt', [fb, this.lExpo]),
       device.createRenderPipelineAsync({
         label: 'final',
         layout: device.createPipelineLayout({ bindGroupLayouts: [fb, this.lFinal] }),
@@ -82,8 +93,23 @@ export class Post {
     for (let i = 0; i < BLOOM_LEVELS * 2; i++) this.bloomU.push(buffer(device, 16, U.UNIFORM | U.COPY_DST));
     this.fontBuf = bufferWith(device, FONT_WORDS, U.STORAGE, 'font');
     this.textBuf = buffer(device, 64 * 10 * 4, U.STORAGE | U.COPY_DST, 'text');
-    this.expoBuf = buffer(device, 16, U.STORAGE | U.COPY_DST, 'exposure');
+    // exposure, EV, metered log2 luminance, set (exposure.wgsl); w = 0 makes the first frame snap
+    this.expoBuf = buffer(device, 16, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'exposure');
     device.queue.writeBuffer(this.expoBuf, 0, new Float32Array([1, 0, 0, 0]));
+    this.histBuf = buffer(device, 128 * 4, U.STORAGE | U.COPY_DST, 'lumHist');
+  }
+
+  // Debug only: read back [exposure, EV, metered log2 luminance, set].
+  async debugExposure(): Promise<number[]> {
+    const { device } = this.ctx;
+    const rb = buffer(device, 16, U.MAP_READ | U.COPY_DST);
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.expoBuf, 0, rb, 0, 16);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const a = Array.from(new Float32Array(rb.getMappedRange()));
+    rb.unmap(); rb.destroy();
+    return a;
   }
 
   createTargets(fullW: number, fullH: number, outW: number, outH: number): Targets {
@@ -158,6 +184,14 @@ export class Post {
         { binding: 3, resource: { buffer: u } },
       ] }));
     }
+    // eye adaptation meters bloom down level 1 (a quarter of the output resolution)
+    this.expoW = this.dims[2]; this.expoH = this.dims[3];
+    this.bgExpo = device.createBindGroup({ layout: this.lExpo, entries: [
+      { binding: 0, resource: mv(t.bloomDown, 1) },
+      { binding: 1, resource: { buffer: this.histBuf } },
+      { binding: 2, resource: { buffer: this.expoBuf } },
+      { binding: 3, resource: { buffer: this.taaU } },
+    ] });
     this.bgFinal = [0, 1].map((i) => device.createBindGroup({ layout: this.lFinal, entries: [
       { binding: 0, resource: t.hist[i].createView() },
       { binding: 1, resource: mv(t.bloomUp, 0) },
@@ -191,6 +225,12 @@ export class Post {
       pass.setBindGroup(1, this.bgDown[hi * BLOOM_LEVELS + k]);
       pass.dispatchWorkgroups(Math.ceil(this.dims[k * 2] / 8), Math.ceil(this.dims[k * 2 + 1] / 8));
     }
+    // eye adaptation (needs down level 1; the final pass reads the result)
+    pass.setBindGroup(1, this.bgExpo);
+    pass.setPipeline(this.pHist);
+    pass.dispatchWorkgroups(Math.ceil(this.expoW / 16), Math.ceil(this.expoH / 16));
+    pass.setPipeline(this.pAdapt);
+    pass.dispatchWorkgroups(1);
     pass.setPipeline(this.pUp);
     for (let i = 0; i < this.bgUp.length; i++) {
       const k = BLOOM_LEVELS - 2 - i;

@@ -4,6 +4,7 @@
 import { Input, K } from './input';
 import { v3, q4, qmul, qnorm, qrot, qslerp, qlookDir, qlookDirV, clamp, type V3, type Q4 } from './math';
 import { clock, DT } from './clock';
+import type { Collider } from './collide';
 
 export interface Pose { pos: V3; q: Q4 }
 
@@ -46,6 +47,8 @@ export class Camera {
   private pathKeys = 0;
   onPathDone: (() => void) | null = null;
   ground: GroundQuery | null = null;
+  // free flight stops at solid things (scripted flights and paths pass through, so they cannot stall)
+  collide: Collider | null = null;
 
   setPose(x: number, y: number, z: number, dx: number, dy: number, dz: number) {
     this.pos[0] = x; this.pos[1] = y; this.pos[2] = z;
@@ -182,8 +185,10 @@ export class Camera {
     this.pos[0] += this.vel[0] * dt;
     this.pos[1] += this.vel[1] * dt;
     this.pos[2] += this.vel[2] * dt;
-    // soft ground clearance (keeps the camera from slipping under the surface)
-    if (this.ground) {
+    // collisions with the terrain and solid things (collide.ts), or the plain ground clearance
+    const col = this.collide;
+    if (col && col.enabled) col.resolve(this.prevPos, this.pos, this.vel);
+    else if (this.ground) {
       this.sampleGround();
       const gh = this.tmp[0] + 1.2;
       if (this.pos[1] < gh) { this.pos[1] = gh; if (this.vel[1] < 0) this.vel[1] = 0; }

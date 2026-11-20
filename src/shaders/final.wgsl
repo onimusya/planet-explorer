@@ -6,7 +6,7 @@
 @group(1) @binding(1) var bloomTex: texture_2d<f32>;
 @group(1) @binding(2) var<storage, read> font: array<u32>;   // 2 words per glyph (ASCII 32..95)
 @group(1) @binding(3) var<storage, read> textBuf: array<u32>; // TEXT_COLS x TEXT_ROWS char codes
-@group(1) @binding(4) var<uniform> FU: vec4f;                 // x bloom strength, y overlay on, z sun screen vis, w sharpen
+@group(1) @binding(4) var<uniform> FU: vec4f;                 // x bloom strength, y overlay on, z fade to black, w sharpen
 @group(1) @binding(5) var<storage, read> expo: array<f32>;    // [0] = adapted exposure
 @group(1) @binding(6) var fxTex: texture_2d<f32>;             // airborne particles (fx.wgsl)
 
@@ -85,6 +85,8 @@ fn fs(in: VO) -> @location(0) vec4f {
   // pre-tonemap grading: gentle warm/cool split and saturation
   let l = luma(c);
   c = mix(vec3f(l), c, 1.12);
+  // night: dim tones lose colour toward a cool blue, as eyes see in low light (glows keep theirs)
+  c = mix(c, vec3f(l) * vec3f(0.74, 0.9, 1.3), F.sky.w * 0.4 * (1.0 - smoothstep(0.03, 0.6, l)));
   c = max(c, vec3f(0.0));
   var t = acesFit(c);
   // vignette
@@ -97,6 +99,8 @@ fn fs(in: VO) -> @location(0) vec4f {
   // film grain / dither
   let gn = ign(px, F.misc.x) - 0.5;
   s += gn * (1.5 / 255.0);
+  // fade to black while the time of day changes (main.ts)
+  s *= 1.0 - FU.z;
   if (FU.y > 0.5) {
     let o = overlay(px);
     s = mix(s, s * 0.35, o.y * 0.85);

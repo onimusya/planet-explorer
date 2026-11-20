@@ -17,22 +17,24 @@ const VOLUME = 0.55;
 const EDGE = 20; // s: how far into each end to look for a faded intro or outro to trim
 
 const wrap = (d: number) => d - WORLD_L * Math.round(d / WORLD_L);
-const smooth = (a: number, b: number, x: number) => {
-  const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
-  return t * t * (3 - 2 * t);
-};
 // Region weights, the same masks the shaders use (world.wgsl valleyMask, highlandMask).
 const abx = wrap(VALLEY_B[0] - VALLEY_A[0]), abz = wrap(VALLEY_B[1] - VALLEY_A[1]);
-function valleyW(x: number, z: number) {
-  const px = wrap(x - VALLEY_A[0]), pz = wrap(z - VALLEY_A[1]);
+// Per frame: the valley and highland weights of the camera position p into w[0], w[1]. The math
+// is inline because a fractional number passed to or returned from a call that the JIT does not
+// inline is boxed into a new heap object.
+function regionWeights(p: Float64Array, w: Float64Array) {
+  let px = p[0] - VALLEY_A[0], pz = p[2] - VALLEY_A[1];
+  px -= WORLD_L * Math.round(px / WORLD_L); pz -= WORLD_L * Math.round(pz / WORLD_L);
   const t = Math.min(Math.max((px * abx + pz * abz) / (abx * abx + abz * abz), 0), 1);
-  const dx = px - abx * t, dz = pz - abz * t;
-  return 1 - smooth(500, 1300, Math.sqrt(dx * dx + dz * dz));
+  let dx = px - abx * t, dz = pz - abz * t;
+  let s = Math.min(Math.max((Math.sqrt(dx * dx + dz * dz) - 500) / 800, 0), 1);
+  w[0] = 1 - s * s * (3 - 2 * s);
+  dx = p[0] - HIGHLANDS_C[0]; dz = p[2] - HIGHLANDS_C[1];
+  dx -= WORLD_L * Math.round(dx / WORLD_L); dz -= WORLD_L * Math.round(dz / WORLD_L);
+  s = Math.min(Math.max((Math.sqrt(dx * dx + dz * dz) - 2000) / 1600, 0), 1);
+  w[1] = 1 - s * s * (3 - 2 * s);
 }
-function highW(x: number, z: number) {
-  const dx = wrap(x - HIGHLANDS_C[0]), dz = wrap(z - HIGHLANDS_C[1]);
-  return 1 - smooth(2000, 3600, Math.sqrt(dx * dx + dz * dz));
-}
+const RW = new Float64Array(2);
 
 interface Voice { src: AudioBufferSourceNode; gain: GainNode }
 
@@ -104,8 +106,9 @@ export class Music {
 
   // Per frame, with the camera position: pick the region (switching only well past a border, so
   // hovering on it does not flip the music) and start a crossfade when its track should change.
-  update(x: number, z: number) {
-    const wv = valleyW(x, z), wh = highW(x, z);
+  update(pos: Float64Array) {
+    regionWeights(pos, RW);
+    const wv = RW[0], wh = RW[1];
     const w0 = 1 - Math.max(wv, wh);
     const cur = this.region === 0 ? w0 : this.region === 1 ? wv : wh;
     const best = wv > w0 && wv >= wh ? 1 : wh > w0 && wh > wv ? 2 : 0;

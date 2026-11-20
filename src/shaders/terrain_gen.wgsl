@@ -265,6 +265,19 @@ fn genAttr(@builtin(global_invocation_id) id: vec3u) {
   textureStore(outRGBA8, px, vec4f(crease, lush, sat(ao), rock));
 }
 
+// Gradient + sun shadow only, for a new key light (a change of the time of day): genAttr's other
+// fields do not depend on the light.
+@compute @workgroup_size(8, 8)
+fn genSun(@builtin(global_invocation_id) id: vec3u) {
+  let px = vec2i(i32(id.x), i32(id.y + G.x));
+  if (px.x >= N || px.y >= N) { return; }
+  let p = vec2f(px) * TX;
+  let gx = (ld(inA, px + vec2i(1, 0)).r - ld(inA, px - vec2i(1, 0)).r) / (2.0 * TX);
+  let gz = (ld(inA, px + vec2i(0, 1)).r - ld(inA, px - vec2i(0, 1)).r) / (2.0 * TX);
+  let shd = sunShadowHeight(p);
+  textureStore(outRGBA16, px, vec4f(gx, gz, shd.x, shd.y));
+}
+
 // Sun shadow height: the minimum height at a point that still sees the sun (+ occluder distance).
 fn sunShadowHeight(p: vec2f) -> vec2f {
   let sd = F.sunDir.xyz;

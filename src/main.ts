@@ -3,13 +3,13 @@ import { initGpu } from './gpu';
 import { createCtx } from './ctx';
 import { Renderer } from './renderer';
 import { Camera } from './camera';
-import { Input } from './input';
+import { Input, K } from './input';
 import { clamp } from './math';
 import { PASS_NAMES } from './metrics';
 import { clock, DT, TIME, FRAME_MS, CPU_MS } from './clock';
 import { Music } from './music';
 import {
-  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGH_CAM, LAKE_C, WORLD_L, valleyFraming,
+  PLANET_NAME, SEED, VISTA_P, VISTA_DIR, VALLEY_A, VALLEY_B, HIGH_CAM, LAKE_C, WORLD_L, TIMES, valleyFraming,
 } from './world';
 
 const canvas = document.getElementById('c') as HTMLCanvasElement;
@@ -23,6 +23,7 @@ const tipBox = document.getElementById('tip') as HTMLElement;
 const tipEl = document.querySelector('#tip span') as HTMLElement;
 const helpEl = document.getElementById('help') as HTMLElement;
 const errEl = document.getElementById('err') as HTMLDivElement;
+const toastEl = document.getElementById('toast') as HTMLElement;
 
 function fail(e: unknown) {
   console.error(e);
@@ -49,6 +50,7 @@ const TIPS = [
   'Long-necked titans and stone colossi walk the mesa tops of the Highlands.',
   'Everything you see is generated in your browser. No textures or models are downloaded.',
   'Press N to switch the music off or on, M for the performance overlay.',
+  'Press T to change the time of day. At night the Valley glows and the stars come out.',
 ];
 let tipI = Math.floor(Math.random() * TIPS.length);
 tipEl.textContent = TIPS[tipI];
@@ -98,11 +100,16 @@ async function main() {
   const camera = new Camera();
   const input = new Input(canvas);
   const r = new Renderer(ctx, camera);
+  // ?time=day|sunset|night: the terrain's shadows are then traced for that light at startup
+  const ti = TIMES.findIndex((t) => t.name === (new URLSearchParams(location.search).get('time') || '').toUpperCase());
+  if (ti >= 0) r.timeIdx = ti;
   await r.init(progress);
   progress(0.86, 'Warming up');
   gate = 1;
   const ground = (x: number, z: number) => Math.max(r.terrain.heightAt(x, z), 0);
   camera.ground = r.terrain;
+  camera.collide = r.col;
+  if (new URLSearchParams(location.search).get('collide') === '0') r.col.enabled = false;
 
   // --- destinations ---
   const setPose = (i: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => {
@@ -274,6 +281,39 @@ async function main() {
     ctx.device.queue.writeBuffer(r.post.textBuf, 0, m.text);
   };
 
+  // --- time of day (T): fade out, switch the light and re-trace the terrain's shadows, fade in ---
+  // tod: phase (0 idle, 1 fading out, 2 re-tracing shadows, 3 fading in), fade (0..1), next index
+  const tod = new Float64Array(3);
+  const toast = (text: string) => {
+    toastEl.textContent = text;
+    toastEl.classList.add('on');
+    setTimeout(() => toastEl.classList.remove('on'), 1700);
+  };
+  const changeTime = (i: number) => {
+    if (tod[0] !== 0 || i === r.timeIdx) return;
+    tod[0] = 1; tod[2] = i;
+  };
+  const stepTime = () => {
+    const dt = clock[DT];
+    if (tod[0] === 1) {
+      tod[1] = Math.min(tod[1] + dt / 0.45, 1);
+      if (tod[1] >= 1) {
+        r.setTime(tod[2]);
+        r.terrain.relight();
+        // the old view's history (TAA, clouds, exposure) must not blend into the new light
+        r.resetHistory = true;
+        toast(TIMES[r.timeIdx].name);
+        tod[0] = 2;
+      }
+    } else if (tod[0] === 2) {
+      if (!r.terrain.relighting) tod[0] = 3;
+    } else if (tod[0] === 3) {
+      tod[1] = Math.max(tod[1] - dt / 1.1, 0);
+      if (tod[1] <= 0) tod[0] = 0;
+    }
+    r.fade[0] = tod[1];
+  };
+
   // Frame-loop scalars live in typed arrays, not closure variables: a fractional number stored
   // in a closure variable is boxed into a new heap object (see clock.ts).
   const lt = new Float64Array(5); // previous rAF timestamp, frame start, quality timer, HUD timer, warm-up start
@@ -316,8 +356,11 @@ async function main() {
     if (a[6]) { a[6] = 0; benchStart(); bench.start = performance.now(); }
     if (a[7]) { a[7] = 0; adaptive = !adaptive; }
     if (a[8]) { a[8] = 0; music.toggle(); }
+    if (a[9]) { a[9] = 0; changeTime((r.timeIdx + 1) % TIMES.length); }
+    if (tod[0] !== 0) stepTime();
     camera.update(input);
-    music.update(camera.pos[0], camera.pos[2]);
+    // (the position goes in as an array: fractional arguments to a call are boxed)
+    music.update(camera.pos);
     // GPU timing runs while something reads it (read back in batches, see Metrics)
     m.gpuEnabled = m.hasGpu && (r.overlayOn || bench.running || adaptive);
     const swap = ctx.gpu.context.getCurrentTexture();
@@ -360,6 +403,16 @@ async function main() {
     volDebug: (m: number) => { r.vol.debug = m; },
     passMs: () => Array.from(r.metrics.passMs),
     music: () => music.state(),
+    expo: () => r.post.debugExposure(), // [exposure, EV, metered log2 luminance, set]
+    // time of day: index into world.ts TIMES (0 day, 1 sunset, 2 night), with the fade as on T
+    time: (i?: number) => { if (i !== undefined) changeTime(i); return r.timeIdx; },
+    timeBusy: () => tod[0] !== 0,
+    collide: (on?: boolean) => { if (on !== undefined) r.col.enabled = on; return r.col.enabled; },
+    collideStats: () => r.col.stats,
+    collideDebug: (x?: number, y?: number, z?: number) => r.col.debug(x, y, z),
+    collideMove: (a: number[], b: number[]) => r.col.debugMove(a, b),
+    // hold movement keys for a while, as if pressed (k: 'W', 'A', 'S', 'D', 'UP', 'DOWN', 'SHIFT')
+    hold: (k: keyof typeof K, ms: number) => { input.keys[K[k]] = 1; setTimeout(() => { input.keys[K[k]] = 0; }, ms); },
     enter: () => enter(false), // dismiss the preloader (audio then waits for the next gesture)
     gate: () => gate,
     loadLog: () => loadLog,

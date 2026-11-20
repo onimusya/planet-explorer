@@ -14,6 +14,30 @@ const D2R = Math.PI / 180;
 export const SUN_AZ = -30 * D2R; // azimuth from north (-Z) toward east (+X)
 export const SUN_EL = 7.5 * D2R;
 export const SUN_DIR = [Math.sin(SUN_AZ) * Math.cos(SUN_EL), Math.sin(SUN_EL), -Math.cos(SUN_AZ) * Math.cos(SUN_EL)];
+// Direction to the ringed gas giant (sky.wgsl): azimuth 30 deg, 10 deg up, 9.5 deg in radius.
+export const GIANT_DIR = [0.492, 0.174, -0.853];
+
+// Times of day (T cycles them; ?time=day|sunset|night picks one at load).
+// key: the light that shades the world, as azimuth / elevation (deg) and illuminance at the top
+//   of the atmosphere. By day and at sunset it is the sun; at night it is the gas giant's
+//   reflected sunlight, from the giant's direction.
+// sun: the real sun, which lights the gas giant and the moon and draws its disk; body: the
+//   brightness of the gas giant and the moon (lower at night, so they read as lit bodies and not
+//   as white disks once the view has adapted to the dark).
+// night: strength of the star field; glow: extra emission of the luminous flora.
+export interface TimeOfDay {
+  name: string; keyAz: number; keyEl: number; key: [number, number, number];
+  sunAz: number; sunEl: number; body: number; night: number; glow: number;
+}
+export const TIMES: TimeOfDay[] = [
+  { name: 'DAY', keyAz: -30, keyEl: 7.5, key: [14, 13.44, 12.6], sunAz: -30, sunEl: 7.5, body: 14, night: 0, glow: 0 },
+  { name: 'SUNSET', keyAz: -30, keyEl: 3.0, key: [14, 10.6, 7.4], sunAz: -30, sunEl: 3.0, body: 14, night: 0, glow: 0.4 },
+  { name: 'NIGHT', keyAz: 29.97, keyEl: 10.02, key: [0.3, 0.27, 0.25], sunAz: -110, sunEl: -20, body: 0.5, night: 1, glow: 0.8 },
+];
+export function dirOf(azDeg: number, elDeg: number, out: Float64Array | number[]) {
+  const a = azDeg * D2R, e = elDeg * D2R;
+  out[0] = Math.sin(a) * Math.cos(e); out[1] = Math.sin(e); out[2] = -Math.cos(a) * Math.cos(e);
+}
 
 const az = (deg: number, dist: number, ox: number, oz: number): [number, number] => [
   ox + Math.sin(deg * D2R) * dist,
@@ -179,6 +203,7 @@ export function wgslPrelude(): string {
     `const RANGE_A: vec2f = ${v2(RANGE_A)};`,
     `const RANGE_B: vec2f = ${v2(RANGE_B)};`,
     `const VISTA_SUNCLEAR: vec2f = ${v2(VISTA_SUNCLEAR)};`,
+    `const GIANT_DIR: vec3f = vec3f(${GIANT_DIR.map(f).join(', ')});`,
     `const FOG_MAX: f32 = ${f(FOG_MAX)};`,
     `const FAUNA_NC: u32 = ${FAUNA_NC}u;`,
     `const FAUNA_BPF: u32 = ${FAUNA_BPF}u;`,

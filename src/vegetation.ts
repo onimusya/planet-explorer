@@ -5,6 +5,7 @@ import { L, bgl, buffer, bufferWith, computePipe, U } from './gpu';
 import type { Ctx } from './ctx';
 import { MeshBuilder, STRIDE, genTree, genMushroom, genCrystal, genFlower, genGlowpod, genShrub, genBoulder, genArch, genIsland, genPillar } from './plants';
 import { SEED } from './world';
+import { isSolidSpecies } from './collide';
 
 interface SpeciesDef {
   gen: (seed: number, variant: number, lod: number) => MeshBuilder;
@@ -42,10 +43,12 @@ export class Vegetation {
   private listsBuf!: GPUBuffer;
   private drawMapBuf!: GPUBuffer;
   indirect!: GPUBuffer;
-  private cullU!: GPUBuffer;
+  cullU!: GPUBuffer; // read by the collision gather too
+  // the culling module, which also holds the collision gather's entry points (collide.ts)
+  cullModule!: Promise<GPUShaderModule>;
   readonly cullData = new Float32Array(INFO + 4);
-  private marksBuf!: GPUBuffer;
-  private nMarks = 0;
+  marksBuf!: GPUBuffer;
+  nMarks = 0;
   private cullBG!: GPUBindGroup;
   private pReset!: GPUComputePipeline;
   private pCull!: GPUComputePipeline;
@@ -71,13 +74,16 @@ export class Vegetation {
 
   // marks: hand-placed landmark instances, which need the generated terrain. The pipelines start
   // compiling first, so they build while the meshes are generated and the terrain finishes.
-  async init(marksP: Promise<Float32Array>) {
+  // onSolid receives the LOD 0 meshes of the solid species as soon as they exist (collide.ts
+  // builds their distance fields while the terrain is still generating).
+  async init(marksP: Promise<Float32Array>, onSolid?: (meshes: { s: number; v: number; mb: MeshBuilder }[]) => void) {
     const { device } = this.ctx;
     // ---- pipelines ----
     const C = GPUShaderStage.COMPUTE;
     const cl = bgl(device, [L.uniform(0, C), L.storageRO(1, C), L.storage(2), L.storage(3), L.storageRO(4, C), L.storage(5), L.storageRO(6, C)]);
     const fb = this.ctx.frameBGL, wb = this.ctx.worldBGL;
-    const [cmod, vmod] = await Promise.all([this.ctx.module(cullSrc, 'veg_cull'), this.ctx.module(vegSrc, 'veg')]);
+    this.cullModule = this.ctx.module(cullSrc, 'veg_cull');
+    const [cmod, vmod] = await Promise.all([this.cullModule, this.ctx.module(vegSrc, 'veg')]);
     const cullP = Promise.all([
       computePipe(device, cmod, 'reset', [fb, wb, cl]),
       computePipe(device, cmod, 'cull', [fb, wb, cl]),
@@ -116,6 +122,7 @@ export class Vegetation {
     const parts: MeshBuilder[] = [];
     let vcount = 0;
     const recs: { mb: MeshBuilder; rec: MeshRec }[] = [];
+    const solid: { s: number; v: number; mb: MeshBuilder }[] = [];
     for (let s = 0; s < SPECIES.length; s++) {
       const sd = SPECIES[s];
       meshes.push([]);
@@ -123,6 +130,7 @@ export class Vegetation {
         meshes[s].push([]);
         for (let l = 0; l < 3; l++) {
           const mb = sd.gen(SEED + s * 101, v, l);
+          if (l === 0 && isSolidSpecies(s)) solid.push({ s, v, mb });
           const rec: MeshRec = { baseVertex: vcount, opFirst: 0, opCount: mb.opaque.length, cutFirst: 0, cutCount: mb.cutout.length };
           vcount += mb.count;
           parts.push(mb);
@@ -131,6 +139,7 @@ export class Vegetation {
         }
       }
     }
+    if (onSolid) onSolid(solid);
     const vb = new ArrayBuffer(vcount * STRIDE);
     const f32 = new Float32Array(vb), i8 = new Int8Array(vb), u16 = new Uint16Array(vb), u8 = new Uint8Array(vb);
     let icount = 0;

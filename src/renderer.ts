@@ -11,11 +11,12 @@ import { Grass } from './grass';
 import { Volume } from './volume';
 import { Fauna } from './fauna';
 import { Fx } from './fx';
+import { Collider } from './collide';
 import { Camera } from './camera';
 import { FO } from './frame';
 import { tex2d, T } from './gpu';
 import { m4, m4mul, m4invert, m4perspRevInf, m4viewBasis, m4ortho, halton, v3, v3cross, v3norm, v3set } from './math';
-import { SUN_DIR, WORLD_L } from './world';
+import { TIMES, dirOf, WORLD_L } from './world';
 import { clock, DT, TIME } from './clock';
 
 const NEAR = 0.15; // near plane (m)
@@ -33,6 +34,7 @@ export class Renderer {
   vol: Volume;
   fauna: Fauna;
   fx: Fx;
+  col: Collider;
   private prevIW = 1;
   private prevIH = 1;
   private volDesc: GPUComputePassDescriptor = {};
@@ -43,10 +45,15 @@ export class Renderer {
   private lv = m4();
   private lp = m4();
   private lm = m4();
-  // light basis (the sun is static)
+  // light basis of the key light (setTime)
   private lr = v3();
   private lu = v3();
   private lf = v3();
+  private readonly up = v3(0, 1, 0);
+  private readonly tmpDir = new Float64Array(3);
+  timeIdx = 0; // world.ts TIMES
+  // x = fade to black (0..1) while the time of day changes (main.ts)
+  readonly fade = new Float64Array(1);
   vegScale = 1;
   // per-frame scalars that only change on resize, and the TAA jitter sequence (Halton 2,3)
   private aspect = 1;
@@ -104,6 +111,7 @@ export class Renderer {
     this.vol = new Volume(ctx);
     this.fauna = new Fauna(ctx);
     this.fx = new Fx(ctx);
+    this.col = new Collider(ctx);
     this.waterColorAtt = { view: undefined as unknown as GPUTextureView, loadOp: 'load', storeOp: 'store' };
     this.waterDepthAtt = { view: undefined as unknown as GPUTextureView, depthLoadOp: 'load', depthStoreOp: 'store' };
     this.waterDesc = { colorAttachments: [this.waterColorAtt], depthStencilAttachment: this.waterDepthAtt };
@@ -115,9 +123,27 @@ export class Renderer {
       this.jitter[i * 2] = halton(i + 1, 2) - 0.5;
       this.jitter[i * 2 + 1] = halton(i + 1, 3) - 0.5;
     }
-    v3set(this.lf, -SUN_DIR[0], -SUN_DIR[1], -SUN_DIR[2]);
-    v3cross(this.lr, this.lf, v3(0, 1, 0)); v3norm(this.lr, this.lr);
+  }
+
+  // Time of day (world.ts TIMES): the key light that shades the world and its shadow basis, the
+  // real sun that lights the sky bodies, the star field and the glow boost. The terrain's sun
+  // shadows follow only after terrain.relight() (generate() traces them for the light set here).
+  setTime(i: number) {
+    const td = TIMES[i];
+    this.timeIdx = i;
+    const f = this.ctx.frameData;
+    const d = this.tmpDir;
+    dirOf(td.keyAz, td.keyEl, d);
+    f[FO.sunDir] = d[0]; f[FO.sunDir + 1] = d[1]; f[FO.sunDir + 2] = d[2];
+    f[FO.sunDir + 3] = Math.cos(0.0125);
+    f[FO.sunColor] = td.key[0]; f[FO.sunColor + 1] = td.key[1]; f[FO.sunColor + 2] = td.key[2];
+    v3set(this.lf, -d[0], -d[1], -d[2]);
+    v3cross(this.lr, this.lf, this.up); v3norm(this.lr, this.lr);
     v3cross(this.lu, this.lr, this.lf);
+    dirOf(td.sunAz, td.sunEl, d);
+    f[FO.sky] = d[0]; f[FO.sky + 1] = d[1]; f[FO.sky + 2] = d[2]; f[FO.sky + 3] = td.night;
+    f[FO.skyCol] = td.body; f[FO.skyCol + 1] = td.body * 0.96; f[FO.skyCol + 2] = td.body * 0.9; f[FO.skyCol + 3] = 1;
+    f[FO.extra + 2] = td.glow;
   }
 
   async init(progress: (f: number, m: string) => void) {
@@ -145,13 +171,19 @@ export class Renderer {
     const task = (i: number, p: Promise<unknown>) => p.then(() => { frac[i] = 1; report(); });
     report();
     const terrain = this.terrain.generate((f, m) => { frac[1] = Math.min(f / 0.92, 0.99); label[1] = m; report(); });
+    // collision shapes come from the solid flora meshes, as soon as those exist
+    let shapes: Promise<void> = Promise.resolve();
+    const veg = this.veg.init(terrain.then(() => buildMarks((x, z) => this.terrain.heightAt(x, z))),
+      (solid) => { shapes = this.col.buildShapes(solid); });
     await Promise.all([
       task(0, this.atmo.init().then(() => this.atmo.precompute())),
       task(1, terrain),
       task(2, Promise.all([this.terrain.initRender('rgba16float'), this.post.init(this.ctx.worldBGL), this.water.init(), this.vol.init()])),
-      task(3, Promise.all([this.veg.init(terrain.then(() => buildMarks((x, z) => this.terrain.heightAt(x, z)))), this.grass.init()])),
-      task(4, Promise.all([this.fauna.init(), this.fx.init()])),
+      task(3, Promise.all([veg.then(() => shapes), this.grass.init()])),
+      task(4, Promise.all([this.fauna.init(), this.fx.init(), this.col.init(this.veg.cullModule)])),
     ]);
+    this.col.bind(this.veg.cullU, this.veg.marksBuf, this.veg.nMarks, this.fauna.poseBuf);
+    this.col.ground = this.terrain;
     this.shadowTex = tex2d(device, SHADOW_SIZE, SHADOW_SIZE, 'depth32float', T.RENDER_ATTACHMENT | T.TEXTURE_BINDING, 'shadow', 1, CASCADES);
     // clear shadow layers once (until casters exist)
     {
@@ -253,9 +285,8 @@ export class Renderer {
 
   private writeStaticFrame() {
     const f = this.ctx.frameData;
-    f[FO.sunDir] = SUN_DIR[0]; f[FO.sunDir + 1] = SUN_DIR[1]; f[FO.sunDir + 2] = SUN_DIR[2];
-    f[FO.sunDir + 3] = Math.cos(0.0125);
-    f[FO.sunColor] = 1.0 * 14; f[FO.sunColor + 1] = 0.96 * 14; f[FO.sunColor + 2] = 0.9 * 14; f[FO.sunColor + 3] = 1;
+    this.setTime(this.timeIdx);
+    f[FO.sunColor + 3] = 1;
     f[FO.shadowInfo] = SHADOW_SIZE; f[FO.shadowInfo + 1] = 1 / SHADOW_SIZE; f[FO.shadowInfo + 2] = CASCADES;
     this.ctx.device.queue.writeBuffer(this.ctx.frameBuf, 0, f);
   }
@@ -354,10 +385,13 @@ export class Renderer {
     device.queue.writeBuffer(this.post.taaU, 0, this.post.taaData);
     this.vol.update(this.resetHistory || this.prevIW !== iw || this.prevIH !== ih, this.prevIW, this.prevIH);
     this.post.finalData[0] = 0.045; this.post.finalData[1] = this.overlayOn ? 1 : 0; this.post.finalData[3] = 0.35;
+    this.post.finalData[2] = this.fade[0];
     device.queue.writeBuffer(this.post.finalU, 0, this.post.finalData);
 
     const m = this.metrics;
     const enc = device.createCommandEncoder();
+    // a new time of day: re-trace one slice of the terrain's sun shadows (see Terrain.relight)
+    if (this.terrain.relighting) this.terrain.relightStep(enc);
     // 1. atmosphere LUTs
     this.computeDesc.timestampWrites = m.ts(0);
     let cp = enc.beginComputePass(this.computeDesc);
@@ -365,7 +399,10 @@ export class Renderer {
     this.veg.encodeCull(cp, this.worldBG);
     this.grass.encodeCull(cp, this.worldBG);
     this.fauna.encodeUpdate(cp, this.worldBG);
+    // solid things near the camera (scripted flights pass through them, so they need none)
+    const colSlot = cam.busy ? -1 : this.col.encode(cp, this.worldBG, cam.pos, cam.vel);
     cp.end();
+    this.col.copy(enc, colSlot);
     // 1b. shadow cascades
     for (let c = 0; c < CASCADES; c++) {
       const d = this.shadowDescs[c];
@@ -411,6 +448,7 @@ export class Renderer {
     this.cmd[0] = enc.finish();
     device.queue.submit(this.cmd);
     m.poll();
+    this.col.poll();
     this.prevVP.set(this.vpNJ);
     this.prevIW = iw; this.prevIH = ih;
     this.hist = 1 - this.hist;

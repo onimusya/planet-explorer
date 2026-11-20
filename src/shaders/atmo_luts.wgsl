@@ -229,6 +229,9 @@ fn ambientSH(@builtin(local_invocation_index) li: u32) {
   let sunT = sunTransmittance(transTex, sLinClamp, 0.0, F.sunDir.y);
   // irradiance on flat ground (direct sun + rough sky term) used for the ground bounce
   let groundIrr = sun * sunT * max(F.sunDir.y, 0.0) + sun * 0.06;
+  // night: starlight, airglow and the glow around the gas giant add to the dim sky's fill, so
+  // faces turned away from the giant still read
+  let skyGain = 1.0 + F.sky.w * 3.0;
   let NS = 16u;
   for (var s = 0u; s < NS; s++) {
     let idx = f32(li * NS + s) + 0.5;
@@ -240,7 +243,7 @@ fn ambientSH(@builtin(local_invocation_index) li: u32) {
     // our SH basis uses (x, y, z) with y up: remap so basis "z" axis is world up
     var Lr: vec3f;
     if (d.y > -0.03) {
-      Lr = skyRadiance(skyTex, sLinClamp, alt, vec3f(d.x, max(d.y, 0.0), d.z), F.sunDir.xyz) * sun;
+      Lr = skyRadiance(skyTex, sLinClamp, alt, vec3f(d.x, max(d.y, 0.0), d.z), F.sunDir.xyz) * sun * skyGain;
     } else {
       Lr = GROUND_ALBEDO * groundIrr / PI;
     }

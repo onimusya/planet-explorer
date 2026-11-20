@@ -35,6 +35,7 @@ export class Input {
         case 'KeyB': if (down) this.actions[6] = 1; break;
         case 'KeyG': if (down) this.actions[7] = 1; break;
         case 'KeyN': if (down) this.actions[8] = 1; break;
+        case 'KeyT': if (down) this.actions[9] = 1; break;
         default: return;
       }
       if (this.locked || e.code === 'Space') e.preventDefault();

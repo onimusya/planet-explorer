@@ -673,7 +673,7 @@ function pack(meshes: MeshBuilder[]) {
 }
 
 export class Fauna {
-  private poseBuf!: GPUBuffer;
+  poseBuf!: GPUBuffer; // read by the collision gather too
   private vbuf!: GPUBuffer;
   private ibuf!: GPUBuffer;
   private draws: { first: number; count: number; base: number }[] = [];

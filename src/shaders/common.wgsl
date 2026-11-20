@@ -21,7 +21,9 @@ struct Frame {
   cascadeSplits: vec4f,   // far distance of each shadow cascade (m)
   shadowMats: array<mat4x4f, 4>,
   shadowInfo: vec4f,      // x = shadow map size, y = 1/size, z = cascade count
-  extra: vec4f,           // x = camera height above terrain, y = auto exposure, z = glow boost, w = debug
+  extra: vec4f,           // x = camera height above terrain, y = -, z = glow boost, w = debug
+  sky: vec4f,             // xyz = direction to the real sun (sunDir is the key light), w = night (star field)
+  skyCol: vec4f,          // rgb = sunlight on the gas giant and the moon, w = sun disk
 };
 
 @group(0) @binding(0) var<uniform> F: Frame;

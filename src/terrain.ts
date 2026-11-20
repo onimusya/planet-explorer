@@ -14,6 +14,7 @@ const BLOCKS = HMAP_N / 64;
 const BLOCK_M = WORLD_L / BLOCKS; // 256 m
 const CPU_N = HMAP_N / 4;
 const STACK = 4 * LODS; // the walk keeps at most 3 waiting nodes per level, plus the current one
+const RELIGHT_ROWS = 128; // heightmap rows of sun shadow re-traced per frame by relightStep()
 
 export class Terrain {
   hTex!: GPUTexture;
@@ -47,6 +48,15 @@ export class Terrain {
   private stD = new Float64Array(STACK);
   nodeCount = 0;
   rangeScale = 1;
+  // relight (see relight()): pipelines and bind groups kept from generate()
+  private pSun!: GPUComputePipeline;
+  private bgSun!: GPUBindGroup;
+  private pCoarse!: GPUComputePipeline;
+  private pCmip!: GPUComputePipeline;
+  private bgCoarse: GPUBindGroup[] = [];
+  private gBuf!: GPUBuffer;
+  private readonly relightData = new Uint32Array(4);
+  private relightRow = HMAP_N + 1; // next row to trace; HMAP_N: the coarse field; above: done
 
   constructor(private ctx: Ctx) {}
 
@@ -87,7 +97,9 @@ export class Terrain {
       coarse: bgl(device, [E.inA, E.inB, E.outRGBA16]),
       cmip: bgl(device, [E.inB, E.outRGBA16]),
       trail: bgl(device, [E.outRGBA8]),
+      sun: bgl(device, [E.inA, E.outRGBA16, E.inMax, E.G]),
     };
+    const pSunP = computePipe(device, mod, 'genSun', [fb, lay.sun]);
     const [pBase, pFin, pMip, pAttr, pCpu, pMm, pCoarse, pCmip, pTrail] = await Promise.all([
       computePipe(device, mod, 'genBase', [fb, lay.base]),
       computePipe(device, mod, 'genFinal', [fb, lay.fin]),
@@ -148,18 +160,17 @@ export class Terrain {
     {
       const CN = N / 4, cm = Math.log2(CN) + 1;
       this.fTex = tex2d(device, CN, CN, 'rgba16float', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'coarseField', cm);
+      // kept for relight(): a new key light re-traces the sun shadows and rebuilds this field
+      this.pCoarse = pCoarse; this.pCmip = pCmip;
+      this.bgCoarse = [mk(lay.coarse, [[0, v(this.hTex, 0)], [3, v(this.gTex)], [4, v(this.fTex, 0)]])];
+      for (let m = 1; m < cm; m++) this.bgCoarse.push(mk(lay.cmip, [[3, v(this.fTex, m - 1)], [4, v(this.fTex, m)]]));
+      this.pSun = await pSunP;
+      this.bgSun = mk(lay.sun, [[0, v(this.hTex, 0)], [4, v(this.gTex)], [5, v(this.hTex, 0, mips)], [7, { buffer: gBuf }]]);
+      this.gBuf = gBuf;
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setBindGroup(0, this.ctx.frameBG);
-      pass.setPipeline(pCoarse);
-      pass.setBindGroup(1, mk(lay.coarse, [[0, v(this.hTex, 0)], [3, v(this.gTex)], [4, v(this.fTex, 0)]]));
-      pass.dispatchWorkgroups(CN / 8, CN / 8);
-      pass.setPipeline(pCmip);
-      for (let m = 1; m < cm; m++) {
-        pass.setBindGroup(1, mk(lay.cmip, [[3, v(this.fTex, m - 1)], [4, v(this.fTex, m)]]));
-        const s = Math.max(1, CN >> m);
-        pass.dispatchWorkgroups(Math.ceil(s / 8), Math.ceil(s / 8));
-      }
+      this.encodeCoarse(pass);
       this.tTex = tex2d(device, TRAIL_N, TRAIL_N, 'rgba8unorm', T.STORAGE_BINDING | T.TEXTURE_BINDING, 'trail');
       pass.setPipeline(pTrail);
       pass.setBindGroup(1, mk(lay.trail, [[2, v(this.tTex)]]));
@@ -194,6 +205,45 @@ export class Terrain {
     attrTmp.destroy();
     mmBuf.destroy();
     cgBuf.destroy();
+  }
+
+  // Coarse volumetrics field (height, shadow height, occluder distance) and its mips, from the
+  // height and gradient/shadow maps. The pass must have the frame bind group set.
+  private encodeCoarse(pass: GPUComputePassEncoder) {
+    const CN = HMAP_N / 4;
+    pass.setPipeline(this.pCoarse);
+    pass.setBindGroup(1, this.bgCoarse[0]);
+    pass.dispatchWorkgroups(CN / 8, CN / 8);
+    pass.setPipeline(this.pCmip);
+    for (let m = 1; m < this.bgCoarse.length; m++) {
+      pass.setBindGroup(1, this.bgCoarse[m]);
+      const s = Math.max(1, CN >> m);
+      pass.dispatchWorkgroups(Math.ceil(s / 8), Math.ceil(s / 8));
+    }
+  }
+
+  // Re-traces the terrain's sun shadows for the key light now in the frame uniform (a change of
+  // the time of day), one slice of rows per frame from relightStep(), then rebuilds the coarse
+  // field. Until it finishes the shadows are a mix of old and new rows: main.ts fades the view out.
+  relight() { this.relightRow = 0; }
+  get relighting() { return this.relightRow < HMAP_N + 1; }
+  // Encodes the next slice into the frame's encoder; call before the frame's own passes.
+  relightStep(enc: GPUCommandEncoder) {
+    if (this.relightRow > HMAP_N) return;
+    const pass = enc.beginComputePass();
+    pass.setBindGroup(0, this.ctx.frameBG);
+    if (this.relightRow < HMAP_N) {
+      this.relightData[0] = this.relightRow;
+      this.ctx.device.queue.writeBuffer(this.gBuf, 0, this.relightData);
+      pass.setPipeline(this.pSun);
+      pass.setBindGroup(1, this.bgSun);
+      pass.dispatchWorkgroups(HMAP_N / 8, RELIGHT_ROWS / 8);
+      this.relightRow += RELIGHT_ROWS;
+    } else {
+      this.encodeCoarse(pass);
+      this.relightRow++;
+    }
+    pass.end();
   }
 
   private buildPyramid(mm: Float32Array) {
